@@ -1,0 +1,14 @@
+services:
+  fund-dashboard:
+    build: .
+    container_name: fund-dashboard
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      FUND_APP_PIN: ""
+      FUND_DB_PATH: "/data/fund_tracker.sqlite3"
+      FUND_APP_HOST: "0.0.0.0"
+      FUND_APP_PORT: "8765"
+    volumes:
+      - ./data:/data

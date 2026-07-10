@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7fb">
+  <title>当日历史 · 基金盈亏</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="shell detail-shell">
+    <header class="app-header">
+      <div>
+        <a class="back-link" href="{{ url_for('index') }}">← 返回持仓</a>
+        <h1>当日历史</h1>
+        <p>{{ today }} · 今日盈亏、收益率、当前市值</p>
+      </div>
+      <div class="refresh-box">
+        <span>{{ refresh_state.last_run or "尚未刷新" }}</span>
+        <form id="refresh-form" action="/refresh" method="post">
+          <button class="primary" type="submit">刷新</button>
+        </form>
+      </div>
+    </header>
+
+    <section class="metrics today-metrics">
+      <article class="metric-main {{ 'gain' if totals.today_pnl >= 0 else 'loss' }}">
+        <span>今日盈亏</span>
+        <strong class="money-value">{{ totals.today_pnl|money }}</strong>
+      </article>
+      <article class="{{ 'gain' if totals.today_return >= 0 else 'loss' }}">
+        <span>今日预估收益率</span>
+        <strong>{{ "%.2f%%"|format(totals.today_return * 100) }}</strong>
+      </article>
+      <article>
+        <span>当前市值</span>
+        <strong class="money-value">{{ totals.market|money }}</strong>
+      </article>
+    </section>
+
+    <section class="panel chart-panel">
+      <div class="chart-head">
+        <div>
+          <h2>组合当日历史</h2>
+          <p>横轴固定 09:30-15:00，午休 11:30-13:00 不取值</p>
+        </div>
+      </div>
+      <div id="today-chart" class="chart-box compare-chart"></div>
+    </section>
+  </main>
+
+  <script>
+    const todaySeries = {{ series|tojson }};
+    const metric = new URLSearchParams(location.search).get("metric") || "pnl";
+    const privacyHidden = localStorage.getItem("fundPrivacyHidden") === "1";
+    document.body.classList.toggle("privacy-on", privacyHidden);
+    const config = {
+      pnl: { label: "今日盈亏", key: "today_pnl", unit: "" },
+      return: { label: "今日预估收益率", key: "today_return", unit: "%" },
+      market: { label: "盘中预估市值", key: "market", unit: "" }
+    }[metric] || { label: "今日盈亏", key: "today_pnl", unit: "" };
+
+    function marketX(time, width, pad) {
+      if (!time || !time.includes(":")) return null;
+      const [h, m] = time.split(":").map(Number);
+      const minutes = h * 60 + m;
+      const morningStart = 9 * 60 + 30;
+      const morningEnd = 11 * 60 + 30;
+      const afternoonStart = 13 * 60;
+      const afternoonEnd = 15 * 60;
+      let active;
+      if (minutes >= morningStart && minutes <= morningEnd) active = minutes - morningStart;
+      else if (minutes >= afternoonStart && minutes <= afternoonEnd) active = 120 + minutes - afternoonStart;
+      else return null;
+      return pad.left + active * (width - pad.left - pad.right) / 240;
+    }
+
+    function todayAxisTicks(width, pad) {
+      const dense = width >= 760;
+      const labels = dense
+        ? ["09:30", "10:00", "10:30", "11:00", "11:30/13:00", "13:30", "14:00", "14:30", "15:00"]
+        : ["09:30", "10:30", "11:30/13:00", "14:00", "15:00"];
+      return labels.map(label => {
+        const raw = label === "11:30/13:00" ? "11:30" : label;
+        const x = marketX(raw, width, pad);
+        if (x === null) return null;
+        const cls = label === "15:00" ? "axis-label end" : label === "09:30" ? "axis-label start" : "axis-label middle";
+        return { label, x, cls };
+      }).filter(Boolean);
+    }
+
+    function drawTodayMetric() {
+      const el = document.querySelector("#today-chart");
+      const rows = todaySeries
+        .filter(row => row[config.key] !== null && row[config.key] !== undefined)
+        .map(row => ({ label: row.time, value: Number(row[config.key]) }))
+        .filter(row => Number.isFinite(row.value));
+      if (!rows.length) {
+        el.innerHTML = '<div class="chart-empty">暂无当日历史，刷新后会开始记录。</div>';
+        return;
+      }
+      const width = 860;
+      const height = 340;
+      const pad = { left: 58, right: 18, top: 24, bottom: 42 };
+      const values = rows.map(row => row.value);
+      const useZeroBaseline = metric !== "market";
+      const min = useZeroBaseline ? Math.min(...values, 0) : Math.min(...values);
+      const max = useZeroBaseline ? Math.max(...values, 0) : Math.max(...values);
+      const span = max - min || 1;
+      const paddingRatio = metric === "market" ? 0.3 : 0.16;
+      const yMin = min - span * paddingRatio;
+      const yMax = max + span * paddingRatio;
+      const y = v => pad.top + (yMax - v) * (height - pad.top - pad.bottom) / (yMax - yMin);
+      const segments = [rows];
+      const line = segment => segment.map(row => `${marketX(row.label, width, pad).toFixed(1)},${y(row.value).toFixed(1)}`).join(" ");
+      const ticks = useZeroBaseline ? [yMin, 0, yMax] : [yMin, (yMin + yMax) / 2, yMax];
+      const last = rows[rows.length - 1];
+      const hideMetricValue = privacyHidden && metric !== "return";
+      const formatMetric = value => hideMetricValue ? "••••" : `${value.toFixed(2)}${config.unit}`;
+      const maxRow = rows.reduce((best, row) => row.value > best.value ? row : best, rows[0]);
+      const minRow = rows.reduce((best, row) => row.value < best.value ? row : best, rows[0]);
+      const extremeLabel = (row, label, order) => {
+        const pointX = marketX(row.label, width, pad);
+        if (pointX === null) return "";
+        const pointY = y(row.value);
+        const labelWidth = 128;
+        const labelHeight = 24;
+        const labelX = Math.max(pad.left + 4, Math.min(width - pad.right - labelWidth, pointX - labelWidth / 2));
+        const preferAbove = order === "max";
+        const rawY = preferAbove ? pointY - labelHeight - 10 : pointY + 10;
+        const labelY = Math.max(pad.top + 2, Math.min(height - pad.bottom - labelHeight - 2, rawY));
+        return `
+          <g class="extreme-marker ${order}" transform="translate(${labelX.toFixed(1)}, ${labelY.toFixed(1)})">
+            <rect width="${labelWidth}" height="${labelHeight}" rx="6" />
+            <text x="10" y="16">${label} ${formatMetric(row.value)}</text>
+          </g>
+          <circle cx="${pointX.toFixed(1)}" cy="${pointY.toFixed(1)}" r="3.6" class="extreme-dot ${order}" />
+        `;
+      };
+      const extremeMarkup = maxRow === minRow
+        ? extremeLabel(maxRow, "高/低", "max")
+        : `${extremeLabel(maxRow, "最高", "max")}${extremeLabel(minRow, "最低", "min")}`;
+      const axisTicks = todayAxisTicks(width, pad);
+      el.innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${config.label}">
+          ${ticks.map(v => `
+            <line x1="${pad.left}" y1="${y(v).toFixed(1)}" x2="${width - pad.right}" y2="${y(v).toFixed(1)}" class="${v === 0 ? "zero-line" : "grid-line"}" />
+            <text x="8" y="${(y(v) + 4).toFixed(1)}" class="axis-label">${formatMetric(v)}</text>
+          `).join("")}
+          ${segments.map(segment => `<polyline points="${line(segment)}" class="chart-line fund-line" />`).join("")}
+          ${extremeMarkup}
+          <circle cx="${marketX(last.label, width, pad).toFixed(1)}" cy="${y(last.value).toFixed(1)}" r="3.2" class="last-dot fund-dot" />
+          ${axisTicks.map(tick => `<text x="${tick.x.toFixed(1)}" y="${height - 12}" class="${tick.cls}">${tick.label}</text>`).join("")}
+          <text x="${width - pad.right}" y="18" class="chart-last fund-last">${config.label} ${formatMetric(last.value)}</text>
+          <g class="hover-layer hidden">
+            <line class="hover-line" x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${height - pad.bottom}" />
+            <circle class="hover-dot fund-hover" r="4.2" />
+            <g class="hover-card">
+              <rect width="172" height="56" rx="7" />
+              <text class="hover-date" x="12" y="19"></text>
+              <text class="hover-fund" x="12" y="40"></text>
+            </g>
+          </g>
+          <rect class="hover-capture" x="${pad.left}" y="${pad.top}" width="${width - pad.left - pad.right}" height="${height - pad.top - pad.bottom}" />
+        </svg>
+      `;
+      const svg = el.querySelector("svg");
+      const hoverLayer = svg.querySelector(".hover-layer");
+      const hoverLine = svg.querySelector(".hover-line");
+      const hoverDot = svg.querySelector(".fund-hover");
+      const hoverCard = svg.querySelector(".hover-card");
+      const hoverDate = svg.querySelector(".hover-date");
+      const hoverFund = svg.querySelector(".hover-fund");
+      const nearest = xValue => {
+        let best = rows[0];
+        let bestX = marketX(best.label, width, pad);
+        let bestDistance = Infinity;
+        rows.forEach(row => {
+          const rowX = marketX(row.label, width, pad);
+          const distance = Math.abs(rowX - xValue);
+          if (distance < bestDistance) {
+            best = row;
+            bestX = rowX;
+            bestDistance = distance;
+          }
+        });
+        return { row: best, x: bestX, y: y(best.value) };
+      };
+      const moveHover = event => {
+        const rect = svg.getBoundingClientRect();
+        const rawX = (event.clientX - rect.left) * width / rect.width;
+        const xValue = Math.max(pad.left, Math.min(width - pad.right, rawX));
+        const point = nearest(xValue);
+        hoverLayer.classList.remove("hidden");
+        hoverLine.setAttribute("x1", point.x);
+        hoverLine.setAttribute("x2", point.x);
+        hoverDot.setAttribute("cx", point.x);
+        hoverDot.setAttribute("cy", point.y);
+        hoverDate.textContent = point.row.label;
+        hoverFund.textContent = `${config.label} ${formatMetric(point.row.value)}`;
+        const cardWidth = 172;
+        const cardX = point.x > width - pad.right - cardWidth - 10 ? point.x - cardWidth - 12 : point.x + 12;
+        hoverCard.setAttribute("transform", `translate(${cardX}, ${pad.top + 8})`);
+      };
+      svg.querySelector(".hover-capture").addEventListener("pointermove", moveHover);
+      svg.querySelector(".hover-capture").addEventListener("pointerleave", () => hoverLayer.classList.add("hidden"));
+    }
+
+    drawTodayMetric();
+
+    const initialLastRun = "{{ refresh_state.last_run or '' }}";
+    setInterval(async () => {
+      if (document.hidden) return;
+      try {
+        const res = await fetch("/api/state", { cache: "no-store" });
+        const state = await res.json();
+        if (state.last_run && state.last_run !== initialLastRun) {
+          location.reload();
+        }
+      } catch {}
+    }, 60000);
+  </script>
+</body>
+</html>

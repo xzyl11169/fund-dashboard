@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7fb">
+  <title>{{ fund.code }} · 基金详情</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="shell detail-shell">
+    <header class="app-header">
+      <div>
+        <a class="back-link" href="{{ url_for('index') }}">← 返回持仓</a>
+        <h1>{{ fund.code }}</h1>
+        <p>{{ fund.name }}</p>
+      </div>
+      <div class="refresh-box">
+        <span>{{ refresh_state.last_run or "尚未刷新" }}</span>
+        <form id="refresh-form" action="/refresh" method="post">
+          <button class="primary" type="submit">刷新</button>
+        </form>
+      </div>
+    </header>
+
+    {% if history_error %}
+      <div class="notice">{{ history_error }}</div>
+    {% endif %}
+
+    <section class="panel detail-hero">
+      <div>
+        <span>基金走势</span>
+        <strong>{{ latest_nav.nav|navfmt if latest_nav else "-" }}</strong>
+        <p>{{ latest_nav.valuation_date if latest_nav else "暂无净值" }} · {{ latest_nav.source if latest_nav else "" }}</p>
+      </div>
+      <div class="detail-summary-note">当日看估值动态，历史周期看相对沪深300表现。</div>
+    </section>
+
+    <section class="panel chart-panel">
+      <div class="chart-head">
+        <div>
+          <h2>走势对比</h2>
+          <p id="chart-subtitle">当日盘中估值动态</p>
+        </div>
+        <div id="chart-legend" class="legend">
+          <span class="legend-fund">基金</span>
+          <span class="legend-index">沪深300</span>
+        </div>
+      </div>
+      <div class="range-tabs" role="tablist" aria-label="走势周期">
+        {% for item in compare_ranges %}
+          <button type="button" class="range-tab {{ 'active' if loop.first else '' }}" data-range="{{ item.key }}">{{ item.label }}</button>
+        {% endfor %}
+      </div>
+      <div id="compare-chart" class="chart-box compare-chart"></div>
+    </section>
+
+    <section class="panel history-panel">
+      <div class="panel-title">
+        <h2>最近净值</h2>
+      </div>
+      <div class="mini-list">
+        {% for item in official_history[-12:]|reverse %}
+          <div class="net-card" style="{{ item.pct|pct_bg }}">
+            <span>{{ item.date }}</span>
+            <b>{{ item.nav|navfmt }}</b>
+            <em class="{{ 'gain' if item.pct >= 0 else 'loss' }}">{{ item.pct|percent }}</em>
+          </div>
+        {% else %}
+          <p class="empty">暂无历史净值。</p>
+        {% endfor %}
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const compareRanges = {{ compare_ranges|tojson }};
+
+    function marketX(time, width, pad) {
+      if (!time || !time.includes(":")) return null;
+      const [h, m] = time.split(":").map(Number);
+      const minutes = h * 60 + m;
+      const morningStart = 9 * 60 + 30;
+      const morningEnd = 11 * 60 + 30;
+      const afternoonStart = 13 * 60;
+      const afternoonEnd = 15 * 60;
+      let active;
+      if (minutes >= morningStart && minutes <= morningEnd) active = minutes - morningStart;
+      else if (minutes >= afternoonStart && minutes <= afternoonEnd) active = 120 + minutes - afternoonStart;
+      else return null;
+      return pad.left + active * (width - pad.left - pad.right) / 240;
+    }
+
+    function todayAxisTicks(width, pad) {
+      const dense = width >= 760;
+      const labels = dense
+        ? ["09:30", "10:00", "10:30", "11:00", "11:30/13:00", "13:30", "14:00", "14:30", "15:00"]
+        : ["09:30", "10:30", "11:30/13:00", "14:00", "15:00"];
+      return labels.map(label => {
+        const raw = label === "11:30/13:00" ? "11:30" : label;
+        const x = marketX(raw, width, pad);
+        if (x === null) return null;
+        const cls = label === "15:00" ? "axis-label end" : label === "09:30" ? "axis-label start" : "axis-label middle";
+        return { label, x, cls };
+      }).filter(Boolean);
+    }
+
+    function drawCompare(rangeKey) {
+      const el = document.querySelector("#compare-chart");
+      const subtitle = document.querySelector("#chart-subtitle");
+      const legend = document.querySelector("#chart-legend");
+      const range = compareRanges.find(item => item.key === rangeKey) || compareRanges[0];
+      const fundRows = range.fund || [];
+      const indexRows = range.benchmark || [];
+      const allRows = [...fundRows, ...indexRows];
+      const isToday = range.key === "today";
+      if (subtitle) subtitle.textContent = isToday ? "当日盘中估值动态" : `${range.label} · 基金对比沪深300`;
+      if (legend) legend.classList.toggle("single-line", isToday);
+      if (!el || !allRows.length) {
+        el.innerHTML = '<div class="chart-empty">暂无数据，刷新或稍后再看。</div>';
+        return;
+      }
+      const width = 860;
+      const height = 340;
+      const pad = { left: 48, right: 18, top: 24, bottom: 42 };
+      const values = allRows.map(r => Number(r.value)).filter(Number.isFinite);
+      const min = Math.min(...values, 0);
+      const max = Math.max(...values, 0);
+      const span = max - min || 1;
+      const yMin = min - span * 0.16;
+      const yMax = max + span * 0.16;
+      const longest = fundRows.length >= indexRows.length ? fundRows : indexRows;
+      const labels = isToday ? [] : longest.map(r => r.label);
+      const xFor = rows => i => {
+        if (isToday) return marketX(rows[i].label, width, pad) ?? pad.left;
+        return pad.left + (rows.length === 1 ? 0 : i * (width - pad.left - pad.right) / (rows.length - 1));
+      };
+      const y = v => pad.top + (yMax - v) * (height - pad.top - pad.bottom) / (yMax - yMin);
+      const segments = rows => [rows];
+      const line = rows => rows.map((r, i) => `${xFor(rows)(i).toFixed(1)},${y(Number(r.value)).toFixed(1)}`).join(" ");
+      const zeroY = y(0);
+      const tickValues = [yMin, 0, yMax];
+      const lastFund = fundRows[fundRows.length - 1];
+      const lastIndex = indexRows[indexRows.length - 1];
+      const todayExtremeMarkup = () => {
+        if (!isToday || !fundRows.length) return "";
+        const maxRow = fundRows.reduce((best, row) => Number(row.value) > Number(best.value) ? row : best, fundRows[0]);
+        const minRow = fundRows.reduce((best, row) => Number(row.value) < Number(best.value) ? row : best, fundRows[0]);
+        const marker = (row, label, order) => {
+          const idx = fundRows.indexOf(row);
+          const pointX = xFor(fundRows)(idx);
+          const pointY = y(Number(row.value));
+          const labelWidth = 116;
+          const labelHeight = 24;
+          const labelX = Math.max(pad.left + 4, Math.min(width - pad.right - labelWidth, pointX - labelWidth / 2));
+          const rawY = order === "max" ? pointY - labelHeight - 10 : pointY + 10;
+          const labelY = Math.max(pad.top + 2, Math.min(height - pad.bottom - labelHeight - 2, rawY));
+          return `
+            <g class="extreme-marker ${order}" transform="translate(${labelX.toFixed(1)}, ${labelY.toFixed(1)})">
+              <rect width="${labelWidth}" height="${labelHeight}" rx="6" />
+              <text x="10" y="16">${label} ${Number(row.value).toFixed(2)}%</text>
+            </g>
+            <circle cx="${pointX.toFixed(1)}" cy="${pointY.toFixed(1)}" r="3.6" class="extreme-dot ${order}" />
+          `;
+        };
+        return maxRow === minRow
+          ? marker(maxRow, "高/低", "max")
+          : `${marker(maxRow, "最高", "max")}${marker(minRow, "最低", "min")}`;
+      };
+      const axisTicks = isToday ? todayAxisTicks(width, pad) : [];
+      el.innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="走势对比">
+          ${tickValues.map(v => `
+            <line x1="${pad.left}" y1="${y(v).toFixed(1)}" x2="${width - pad.right}" y2="${y(v).toFixed(1)}" class="${v === 0 ? "zero-line" : "grid-line"}" />
+            <text x="8" y="${(y(v) + 4).toFixed(1)}" class="axis-label">${v.toFixed(2)}%</text>
+          `).join("")}
+          ${fundRows.length ? segments(fundRows).map(rows => `<polyline points="${line(rows)}" class="chart-line fund-line" />`).join("") : ""}
+          ${indexRows.length ? segments(indexRows).map(rows => `<polyline points="${line(rows)}" class="chart-line index-line" />`).join("") : ""}
+          ${todayExtremeMarkup()}
+          ${lastFund ? `<circle cx="${xFor(fundRows)(fundRows.length - 1).toFixed(1)}" cy="${y(Number(lastFund.value)).toFixed(1)}" r="3.2" class="last-dot fund-dot" />` : ""}
+          ${lastIndex && !isToday ? `<circle cx="${xFor(indexRows)(indexRows.length - 1).toFixed(1)}" cy="${y(Number(lastIndex.value)).toFixed(1)}" r="3" class="last-dot index-dot" />` : ""}
+          ${isToday
+            ? axisTicks.map(tick => `<text x="${tick.x.toFixed(1)}" y="${height - 12}" class="${tick.cls}">${tick.label}</text>`).join("")
+            : `<text x="${pad.left}" y="${height - 12}" class="axis-label">${labels[0] || ""}</text><text x="${width - pad.right}" y="${height - 12}" class="axis-label end">${labels[labels.length - 1] || ""}</text>`
+          }
+          ${lastFund ? `<text x="${width - pad.right}" y="18" class="chart-last fund-last">基金 ${Number(lastFund.value).toFixed(2)}%</text>` : ""}
+          ${lastIndex && !isToday ? `<text x="${width - pad.right}" y="36" class="chart-last index-last">沪深300 ${Number(lastIndex.value).toFixed(2)}%</text>` : ""}
+          <g class="hover-layer hidden">
+            <line class="hover-line" x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${height - pad.bottom}" />
+            <circle class="hover-dot fund-hover" r="4.2" />
+            <circle class="hover-dot index-hover" r="4" />
+            <g class="hover-card">
+              <rect width="172" height="${isToday ? 56 : 76}" rx="7" />
+              <text class="hover-date" x="12" y="19"></text>
+              <text class="hover-fund" x="12" y="40"></text>
+              <text class="hover-index" x="12" y="61"></text>
+            </g>
+          </g>
+          <rect class="hover-capture" x="${pad.left}" y="${pad.top}" width="${width - pad.left - pad.right}" height="${height - pad.top - pad.bottom}" />
+        </svg>
+      `;
+      const svg = el.querySelector("svg");
+      const hoverLayer = svg.querySelector(".hover-layer");
+      const hoverLine = svg.querySelector(".hover-line");
+      const fundDot = svg.querySelector(".fund-hover");
+      const indexDot = svg.querySelector(".index-hover");
+      const hoverCard = svg.querySelector(".hover-card");
+      const hoverDate = svg.querySelector(".hover-date");
+      const hoverFund = svg.querySelector(".hover-fund");
+      const hoverIndex = svg.querySelector(".hover-index");
+      const nearest = (rows, xValue) => {
+        if (!rows.length) return null;
+        const scale = xFor(rows);
+        let best = 0;
+        let bestDistance = Infinity;
+        rows.forEach((_row, i) => {
+          const distance = Math.abs(scale(i) - xValue);
+          if (distance < bestDistance) {
+            best = i;
+            bestDistance = distance;
+          }
+        });
+        return { row: rows[best], x: scale(best), y: y(Number(rows[best].value)) };
+      };
+      const moveHover = event => {
+        const rect = svg.getBoundingClientRect();
+        const rawX = (event.clientX - rect.left) * width / rect.width;
+        const xValue = Math.max(pad.left, Math.min(width - pad.right, rawX));
+        const fundPoint = nearest(fundRows, xValue);
+        const indexPoint = nearest(indexRows, xValue);
+        const activeX = fundPoint?.x || indexPoint?.x || xValue;
+        hoverLayer.classList.remove("hidden");
+        hoverLine.setAttribute("x1", activeX);
+        hoverLine.setAttribute("x2", activeX);
+        if (fundPoint) {
+          fundDot.classList.remove("hidden");
+          fundDot.setAttribute("cx", fundPoint.x);
+          fundDot.setAttribute("cy", fundPoint.y);
+        } else {
+          fundDot.classList.add("hidden");
+        }
+        if (indexPoint && !isToday) {
+          indexDot.classList.remove("hidden");
+          indexDot.setAttribute("cx", indexPoint.x);
+          indexDot.setAttribute("cy", indexPoint.y);
+        } else {
+          indexDot.classList.add("hidden");
+        }
+        const label = fundPoint?.row.label || indexPoint?.row.label || "";
+        hoverDate.textContent = label;
+        hoverFund.textContent = fundPoint ? `基金 ${Number(fundPoint.row.value).toFixed(2)}%` : "基金 -";
+        hoverIndex.textContent = !isToday && indexPoint ? `沪深300 ${Number(indexPoint.row.value).toFixed(2)}%` : "";
+        const cardWidth = 172;
+        const cardX = activeX > width - pad.right - cardWidth - 10 ? activeX - cardWidth - 12 : activeX + 12;
+        hoverCard.setAttribute("transform", `translate(${cardX}, ${pad.top + 8})`);
+      };
+      svg.querySelector(".hover-capture").addEventListener("pointermove", moveHover);
+      svg.querySelector(".hover-capture").addEventListener("pointerleave", () => hoverLayer.classList.add("hidden"));
+    }
+
+    document.querySelectorAll(".range-tab").forEach(button => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll(".range-tab").forEach(item => item.classList.remove("active"));
+        button.classList.add("active");
+        drawCompare(button.dataset.range);
+      });
+    });
+    drawCompare("today");
+
+    const initialLastRun = "{{ refresh_state.last_run or '' }}";
+    setInterval(async () => {
+      if (document.hidden) return;
+      try {
+        const res = await fetch("/api/state", { cache: "no-store" });
+        const state = await res.json();
+        if (state.last_run && state.last_run !== initialLastRun) {
+          location.reload();
+        }
+      } catch {}
+    }, 60000);
+  </script>
+</body>
+</html>

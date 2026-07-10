@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7fb">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="基金盈亏">
+  <title>基金今日盈亏</title>
+  <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/apple-touch-icon.png') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <header class="app-header">
+      <div class="header-copy">
+        <div class="mobile-title-row">
+          <h1>基金今日盈亏</h1>
+          <span class="mobile-refresh-time">{{ refresh_state.last_run or "尚未刷新" }}</span>
+        </div>
+        <p>盘中看实时估值，净值更新后看复盘差异。</p>
+      </div>
+      <div class="refresh-box">
+        <span>{{ refresh_state.last_run or "尚未刷新" }}</span>
+        <button id="privacy-toggle" class="ghost-button" type="button" aria-pressed="false">隐藏市值</button>
+        <form id="refresh-form" action="/refresh" method="post">
+          <button class="primary" type="submit">刷新</button>
+        </form>
+      </div>
+    </header>
+    <div id="refresh-progress" class="refresh-progress" aria-hidden="true">
+      <div class="refresh-progress-bar"></div>
+      <span>正在刷新估值...</span>
+    </div>
+
+    <section class="metrics">
+      {% set pnl_color_value = totals.actual_today_pnl if totals.actual_today_pnl is not none else totals.estimate_today_pnl %}
+      {% set return_color_value = totals.actual_today_return if totals.actual_today_return is not none else totals.estimate_today_return %}
+      <a class="metric-link metric-main {{ 'gain' if pnl_color_value >= 0 else 'loss' }}" href="{{ url_for('today_detail') }}?metric=pnl">
+        <span>今日盈亏 <small>预估/实际</small></span>
+        <strong>
+          <em class="money-value">{{ totals.estimate_today_pnl|money }}</em>
+          <i>/</i>
+          <em class="money-value">{{ totals.actual_today_pnl|money }}</em>
+        </strong>
+      </a>
+      <a class="metric-link {{ 'gain' if return_color_value >= 0 else 'loss' }}" href="{{ url_for('today_detail') }}?metric=return">
+        <span>今日收益率 <small>预估/实际</small></span>
+        <strong>
+          <em>{{ "%.2f%%"|format(totals.estimate_today_return * 100) }}</em>
+          <i>/</i>
+          <em>{{ (totals.actual_today_return * 100)|percent if totals.actual_today_return is not none else "-" }}</em>
+        </strong>
+      </a>
+      <a class="metric-link metric-neutral" href="{{ url_for('today_detail') }}?metric=market">
+        <span>当前市值</span>
+        <strong class="money-value">{{ totals.market|money }}</strong>
+      </a>
+      <article class="official-progress-card">
+        <span>净值更新</span>
+        <strong>
+          <em>{{ totals.official_updated_count }}</em>
+          <i>/</i>
+          <em>{{ totals.fund_count }}</em>
+        </strong>
+        <div class="official-progress-track">
+          <div style="width: {{ (totals.official_updated_count / totals.fund_count * 100) if totals.fund_count else 0 }}%"></div>
+        </div>
+      </article>
+      <article class="distribution-card">
+        <span>涨跌分布</span>
+        <strong><em class="gain">{{ totals.up_count }}涨</em> <em class="loss">{{ totals.down_count }}跌</em></strong>
+      </article>
+    </section>
+
+    <section class="workspace">
+      <section class="panel holdings-panel">
+        <div class="panel-title">
+          <h2>持仓</h2>
+          <div class="panel-tools">
+            <form class="sort-form" method="get" action="{{ url_for('index') }}">
+              <label>
+                <span>排序</span>
+                <select name="sort" onchange="this.form.submit()">
+                  <option value="today_pnl_desc" {% if sort == "today_pnl_desc" %}selected{% endif %}>今日盈亏 高到低</option>
+                  <option value="today_pnl_asc" {% if sort == "today_pnl_asc" %}selected{% endif %}>今日盈亏 低到高</option>
+                  <option value="market_desc" {% if sort == "market_desc" %}selected{% endif %}>市值 高到低</option>
+                  <option value="market_asc" {% if sort == "market_asc" %}selected{% endif %}>市值 低到高</option>
+                  <option value="pct_desc" {% if sort == "pct_desc" %}selected{% endif %}>涨跌幅 高到低</option>
+                  <option value="pct_asc" {% if sort == "pct_asc" %}selected{% endif %}>涨跌幅 低到高</option>
+                  <option value="code_asc" {% if sort == "code_asc" %}selected{% endif %}>基金代码</option>
+                </select>
+              </label>
+            </form>
+            <button id="open-position-modal" class="ghost-link" type="button">改份额</button>
+          </div>
+        </div>
+
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr class="group-row">
+                <th rowspan="2">基金</th>
+                <th rowspan="2">状态</th>
+                <th colspan="3" class="estimate-group">预估区</th>
+                <th colspan="3" class="confirmed-group">确认区</th>
+                <th rowspan="2" class="privacy-col">市值/仓位</th>
+                <th rowspan="2" class="privacy-col">份额</th>
+                <th rowspan="2" class="actions-head">操作</th>
+              </tr>
+              <tr class="detail-row">
+                <th class="estimate-group">预估净值</th>
+                <th class="estimate-group">预估涨幅</th>
+                <th class="privacy-col estimate-group">预估盈亏</th>
+                <th class="confirmed-group">确认净值</th>
+                <th class="confirmed-group">确认涨跌</th>
+                <th class="privacy-col confirmed-group">确认盈亏</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for c in cards %}
+              <tr>
+                <td class="fund-cell" data-label="基金">
+                  <div class="fund-main">
+                    <b><a class="fund-link" href="{{ url_for('fund_detail', code=c.fund.code) }}">{{ c.fund.code }}</a></b>
+                    <small>{{ c.fund.name }}</small>
+                  </div>
+                  {% if not c.premarket_mode %}
+                    <span class="state-badge mobile-state {{ 'state-b' if c.state == 'B' else 'state-a' }}">{{ c.state_label }}</span>
+                  {% endif %}
+                </td>
+                <td class="state-cell" data-label="状态">
+                  {% if c.premarket_mode %}-{% else %}<span class="state-badge {{ 'state-b' if c.state == 'B' else 'state-a' }}">{{ c.state_label }}</span>{% endif %}
+                </td>
+                <td data-label="{{ '15:00预估净值' if c.state == 'B' else '实时预估净值' }}" class="num-cell estimate-cell estimate-start">
+                  {% set left_nav = c.estimate_display_nav %}
+                  {% if left_nav %}
+                    <b>{{ left_nav.nav|navfmt }}</b>
+                    <small>{{ left_nav.quoted_at or c.subject_date }}</small>
+                  {% else %}
+                    -
+                  {% endif %}
+                </td>
+                <td data-label="{{ '15:00预估涨幅' if c.state == 'B' else '实时预估涨幅' }}" class="estimate-cell {{ 'gain' if left_nav and left_nav.pct >= 0 else 'loss' }}">
+                  <b>{{ left_nav.pct|percent if left_nav else "-" }}</b>
+                </td>
+                {% set estimate_pnl = c.estimate_display_pnl %}
+                <td data-label="{{ '15:00预估盈亏' if c.state == 'B' else '实时预估盈亏' }}" class="privacy-cell estimate-cell estimate-end {{ 'gain' if estimate_pnl is not none and estimate_pnl >= 0 else 'loss' if estimate_pnl is not none else '' }}">
+                  <b class="money-value">{{ estimate_pnl|money }}</b>
+                </td>
+                <td data-label="{{ '今日净值' if c.state == 'B' else '昨日净值' }}" class="num-cell compare-cell confirmed-cell confirmed-start">
+                  {% set right_nav = c.official_nav if c.state == 'B' else c.prev_nav %}
+                  {% if right_nav %}
+                    <b>{{ right_nav.nav|navfmt }}</b>
+                    <small>{{ right_nav.valuation_date }}</small>
+                  {% else %}
+                    -
+                  {% endif %}
+                </td>
+                <td data-label="{{ '今日涨跌幅' if c.state == 'B' else '昨日涨跌幅' }}" class="compare-cell confirmed-cell {{ 'gain' if right_nav and right_nav.pct >= 0 else 'loss' }}">
+                  <b>{{ right_nav.pct|percent if right_nav else "-" }}</b>
+                </td>
+                {% set confirmed_pnl = c.confirmed_pnl %}
+                <td data-label="{{ c.confirmed_pnl_label }}" class="privacy-cell compare-cell confirmed-cell confirmed-end {{ 'gain' if confirmed_pnl is not none and confirmed_pnl >= 0 else 'loss' if confirmed_pnl is not none else '' }}">
+                  <b class="money-value">{{ confirmed_pnl|money }}</b>
+                </td>
+                <td data-label="市值" class="privacy-cell">
+                  <b class="money-value">{{ c.market|money }}</b>
+                  <small class="position-note">{{ ((c.market / totals.market * 100) if totals.market else none)|percent }}</small>
+                  {% if c.pending_count %}
+                    <small class="pending-note">待确认 {{ c.pending_amount|money }}</small>
+                  {% endif %}
+                </td>
+                <td data-label="份额" class="privacy-cell">
+                  <span class="money-value">{{ c.shares|money }}</span>
+                  {% if c.pending_count %}
+                    <small class="pending-note">待确认 {{ c.pending_shares|money }}</small>
+                  {% endif %}
+                </td>
+                <td data-label="操作" class="actions">
+                  <div class="action-buttons">
+                    <button
+                      class="action-link edit-opening"
+                      type="button"
+                      data-code="{{ c.fund.code }}"
+                      data-name="{{ c.fund.name }}"
+                      data-shares="{{ c.opening.shares if c.opening else '' }}"
+                      data-as-of-date="{{ default_opening_date }}"
+                      data-cost-amount="{{ c.opening.cost_amount if c.opening else 0 }}"
+                    >改份额</button>
+                    <form action="{{ url_for('delete_fund', code=c.fund.code) }}" method="post" onsubmit="return confirm('删除 {{ c.fund.code }} 及其记录？');">
+                      <button class="danger" type="submit">删除</button>
+                    </form>
+                  </div>
+                </td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="11" class="empty">先在右侧录入基金代码和持有份额。</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </section>
+  </main>
+
+  <div id="position-modal" class="modal-backdrop hidden" aria-hidden="true">
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="position-modal-title">
+      <div class="modal-head">
+        <div>
+          <h2 id="position-modal-title">改份额</h2>
+          <p id="position-modal-subtitle">填写最新确认份额</p>
+        </div>
+        <button id="close-position-modal" class="ghost-button" type="button">关闭</button>
+      </div>
+      <form id="position-form" action="/opening" method="post">
+        <input type="hidden" name="code" id="opening-code" value="">
+        <input type="hidden" name="cost_amount" id="opening-cost-amount" value="0">
+        <label>基金代码
+          <input id="opening-code-display" type="text" required inputmode="numeric" placeholder="例如 161130">
+        </label>
+        <p id="opening-lookup-status" class="hint"></p>
+
+        <label>持仓日期
+          <input id="opening-as-of-date" type="date" name="as_of_date" value="{{ default_opening_date }}" required>
+        </label>
+
+        <label class="important-input">持有份额
+          <input id="shares-input" type="number" step="0.01" name="shares" required placeholder="平台显示的当前份额">
+        </label>
+
+        <button class="wide-button" type="submit" id="position-submit">保存份额</button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const positionModal = document.querySelector("#position-modal");
+    const openPositionModalBtn = document.querySelector("#open-position-modal");
+    const closePositionModalBtn = document.querySelector("#close-position-modal");
+    const positionForm = document.querySelector("#position-form");
+    const openingCodeHidden = document.querySelector("#opening-code");
+    const openingCodeDisplay = document.querySelector("#opening-code-display");
+    const openingLookupStatus = document.querySelector("#opening-lookup-status");
+    const sharesInput = document.querySelector("#shares-input");
+    const openingAsOfDate = document.querySelector("#opening-as-of-date");
+    const openingCostAmount = document.querySelector("#opening-cost-amount");
+    const refreshForm = document.querySelector("#refresh-form");
+    const refreshProgress = document.querySelector("#refresh-progress");
+    const privacyToggle = document.querySelector("#privacy-toggle");
+
+    function applyPrivacyMode(hidden) {
+      document.body.classList.toggle("privacy-on", hidden);
+      if (privacyToggle) {
+        privacyToggle.textContent = hidden ? "显示市值" : "隐藏市值";
+        privacyToggle.setAttribute("aria-pressed", hidden ? "true" : "false");
+      }
+      localStorage.setItem("fundPrivacyHidden", hidden ? "1" : "0");
+    }
+
+    applyPrivacyMode(localStorage.getItem("fundPrivacyHidden") === "1");
+    privacyToggle?.addEventListener("click", () => {
+      applyPrivacyMode(!document.body.classList.contains("privacy-on"));
+    });
+
+    async function lookupFund() {
+      const code = openingCodeDisplay.value.trim();
+      if (!/^\d{6}$/.test(code)) {
+        openingLookupStatus.textContent = "";
+        return;
+      }
+      openingLookupStatus.textContent = "正在识别基金名称...";
+      try {
+        const res = await fetch(`/api/fund/${code}`);
+        const data = await res.json();
+        openingLookupStatus.textContent = data.name && data.name !== code ? `已识别：${data.name}` : "暂未识别，保存时会继续尝试";
+      } catch {
+        openingLookupStatus.textContent = "识别失败，保存时会继续尝试";
+      }
+    }
+
+    function openPositionModal(data = {}) {
+      positionModal?.classList.remove("hidden");
+      positionModal?.setAttribute("aria-hidden", "false");
+      document.body.classList.add("modal-open");
+      if (data.code) {
+        openingCodeHidden.value = data.code;
+        openingCodeDisplay.value = data.code;
+      } else {
+        openingCodeHidden.value = "";
+        openingCodeDisplay.value = "";
+      }
+      openingAsOfDate.value = data.asOfDate || "{{ default_opening_date }}";
+      sharesInput.value = data.shares || "";
+      openingCostAmount.value = data.costAmount || 0;
+      openingLookupStatus.textContent = "";
+      requestAnimationFrame(() => sharesInput?.focus());
+      if (data.code) lookupFund();
+    }
+
+    function closePositionModal() {
+      positionModal?.classList.add("hidden");
+      positionModal?.setAttribute("aria-hidden", "true");
+      document.body.classList.remove("modal-open");
+    }
+
+    openPositionModalBtn?.addEventListener("click", () => openPositionModal());
+    closePositionModalBtn?.addEventListener("click", closePositionModal);
+    positionModal?.addEventListener("click", event => {
+      if (event.target === positionModal) closePositionModal();
+    });
+    document.querySelectorAll(".edit-opening").forEach(button => {
+      button.addEventListener("click", () => {
+        openPositionModal({
+          code: button.dataset.code || "",
+          shares: button.dataset.shares || "",
+          asOfDate: button.dataset.asOfDate || "{{ default_opening_date }}",
+          costAmount: button.dataset.costAmount || 0,
+        });
+      });
+    });
+    openingCodeDisplay?.addEventListener("blur", lookupFund);
+    openingCodeDisplay?.addEventListener("change", lookupFund);
+    positionForm?.addEventListener("submit", () => {
+      openingCodeHidden.value = openingCodeDisplay.value.trim();
+    });
+
+    if (new URLSearchParams(location.search).has("edit_opening")) {
+      const code = new URLSearchParams(location.search).get("edit_opening") || "";
+        openPositionModal({
+          code,
+          shares: "{{ edit_opening.shares if edit_opening else '' }}",
+          asOfDate: "{{ default_opening_date }}",
+          costAmount: "{{ edit_opening.cost_amount if edit_opening else 0 }}",
+        });
+      sharesInput?.select();
+    }
+
+    refreshForm?.addEventListener("submit", () => {
+      refreshProgress?.classList.add("active");
+      const button = refreshForm.querySelector("button");
+      if (button) {
+        button.disabled = true;
+        button.textContent = "刷新中";
+      }
+    });
+
+    const initialLastRun = "{{ refresh_state.last_run or '' }}";
+    setInterval(async () => {
+      if (document.hidden) return;
+      try {
+        const res = await fetch("/api/state", { cache: "no-store" });
+        const state = await res.json();
+        if (state.last_run && state.last_run !== initialLastRun) {
+          location.reload();
+        }
+      } catch {}
+    }, 60000);
+  </script>
+</body>
+</html>
