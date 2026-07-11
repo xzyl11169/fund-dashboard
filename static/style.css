@@ -1328,10 +1328,14 @@ select {
 
   .refresh-box {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 8px;
     width: 100%;
     align-items: stretch;
+  }
+
+  .shell:not(.detail-shell) .refresh-box {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .refresh-box span {
@@ -1356,16 +1360,24 @@ select {
     gap: 6px;
   }
 
+  .shell:not(.detail-shell) .refresh-box > .account-actions {
+    display: contents;
+  }
+
   .refresh-box > .account-actions .account-name {
     display: none;
   }
 
   .refresh-box > .account-actions .ghost-link,
   .refresh-box > .account-actions .ghost-button {
-    width: auto;
-    min-width: 42px;
-    padding: 0 9px;
+    width: 100%;
+    min-width: 0;
+    padding: 0 6px;
     white-space: nowrap;
+  }
+
+  .shell:not(.detail-shell) .refresh-box > .account-actions form {
+    width: 100%;
   }
 
   h1 {
