@@ -192,6 +192,14 @@ def init_db():
           created_at text not null
         );
 
+        create table if not exists position_history (
+          id integer primary key autoincrement,
+          code text not null,
+          as_of_date text not null,
+          shares real not null,
+          created_at text not null
+        );
+
         create table if not exists valuations (
           id integer primary key autoincrement,
           valuation_date text not null,
@@ -245,6 +253,25 @@ def init_db():
           created_at text not null,
           primary key(index_code, valuation_date)
         );
+
+        create index if not exists idx_valuations_code_official_date
+          on valuations(code, is_official, valuation_date desc, id desc);
+        create index if not exists idx_ticks_code_date_official_quote
+          on valuation_ticks(code, valuation_date, is_official, quoted_at, sampled_at);
+        create index if not exists idx_trades_code_date_id
+          on trades(code, trade_date, id);
+        create index if not exists idx_position_history_code_date_created
+          on position_history(code, as_of_date, created_at, id);
+        """
+    )
+    conn.execute(
+        """
+        insert into position_history (code, as_of_date, shares, created_at)
+        select o.code, o.as_of_date, o.shares, o.created_at
+        from opening_positions o
+        where not exists (
+          select 1 from position_history h where h.code=o.code
+        )
         """
     )
     conn.commit()
@@ -542,8 +569,8 @@ def should_capture_close_snapshot(item):
     try:
         quoted_time = datetime.strptime(quoted_at, "%Y-%m-%d %H:%M").time()
     except ValueError:
-        quoted_time = now.time()
-    return quoted_time >= dt_time(14, 55) or now.time() >= dt_time(14, 55)
+        return now.time() >= dt_time(14, 55)
+    return quoted_time >= dt_time(14, 55)
 
 
 def capture_close_snapshot(item):
@@ -551,7 +578,12 @@ def capture_close_snapshot(item):
         """
         insert into close_snapshots (snapshot_date, code, nav, pct, quoted_at, created_at)
         values (?, ?, ?, ?, ?, ?)
-        on conflict(snapshot_date, code) do nothing
+        on conflict(snapshot_date, code) do update set
+          nav=excluded.nav,
+          pct=excluded.pct,
+          quoted_at=excluded.quoted_at,
+          created_at=excluded.created_at
+        where coalesce(excluded.quoted_at, '') >= coalesce(close_snapshots.quoted_at, '')
         """,
         (
             item["date"],
@@ -570,14 +602,33 @@ def market_minutes(now=None):
     return now.hour * 60 + now.minute
 
 
+def trading_session(now=None):
+    now = now or cn_now()
+    if not is_trading_day(now.date()):
+        return "closed"
+    minutes = market_minutes(now)
+    if minutes < 9 * 60 + 30:
+        return "premarket"
+    if minutes <= 11 * 60 + 30:
+        return "morning"
+    if minutes < 13 * 60:
+        return "lunch"
+    if minutes <= 15 * 60 + 5:
+        return "afternoon"
+    return "postmarket"
+
+
 def in_intraday_refresh_window(now=None):
+    now = now or cn_now()
+    if not is_trading_day(now.date()):
+        return False
     minutes = market_minutes(now)
     return (9 * 60 + 30 <= minutes <= 11 * 60 + 30) or (13 * 60 <= minutes <= 15 * 60 + 5)
 
 
 def market_session_started(now=None):
     now = now or cn_now()
-    return market_minutes(now) >= 9 * 60 + 30
+    return is_trading_day(now.date()) and market_minutes(now) >= 9 * 60 + 30
 
 
 def next_refresh_sleep(now=None):
@@ -785,19 +836,13 @@ def trades_for(code, until=None, before=None):
 
 
 def shares_before(code, before_date, opening, fallback_nav=0):
-    opening_shares = opening["shares"] if opening else 0
-    opening_date = opening["as_of_date"] if opening else ""
-    if opening_date and opening_date >= before_date:
-        opening_shares = 0
-    rows = [r for r in trades_for(code, before=before_date) if not opening_date or r["trade_date"] > opening_date]
-    return opening_shares + sum(shares_delta(r, fallback_nav) for r in rows)
+    if not opening:
+        return 0
+    return opening["shares"] if opening["as_of_date"] < before_date else 0
 
 
 def shares_current(code, opening, fallback_nav=0):
-    opening_shares = opening["shares"] if opening else 0
-    opening_date = opening["as_of_date"] if opening else ""
-    rows = [r for r in trades_for(code) if not opening_date or r["trade_date"] > opening_date]
-    return opening_shares + sum(shares_delta(r, fallback_nav) for r in rows)
+    return opening["shares"] if opening else 0
 
 
 def confirmed_shares_current(code, opening, fallback_nav=0):
@@ -805,23 +850,11 @@ def confirmed_shares_current(code, opening, fallback_nav=0):
 
 
 def confirmed_trades_after_opening(code, opening):
-    opening_date = opening["as_of_date"] if opening else ""
-    today = cn_today()
-    return [
-        r
-        for r in trades_for(code, before=today)
-        if not opening_date or r["trade_date"] > opening_date
-    ]
+    return []
 
 
 def pending_trades_today(code, opening):
-    opening_date = opening["as_of_date"] if opening else ""
-    today = cn_today()
-    return [
-        r
-        for r in trades_for(code, until=today)
-        if r["trade_date"] == today and (not opening_date or r["trade_date"] > opening_date)
-    ]
+    return []
 
 
 def row_pnl(shares, current_nav, base_nav):
@@ -844,6 +877,8 @@ def confirmed_pnl_for_latest_official(code, opening, fallback_nav=0):
 
 def build_summary():
     today = cn_today()
+    session = trading_session()
+    trading_today = session != "closed"
     market_started = market_session_started()
     funds = db().execute("select * from funds order by code").fetchall()
     cards = []
@@ -857,11 +892,17 @@ def build_summary():
         "estimate_today_base": 0,
         "actual_today_pnl": None,
         "actual_today_base": 0,
+        "blended_today_pnl": 0,
+        "blended_today_base": 0,
         "official_updated_count": 0,
         "fund_count": len(funds),
+        "position_count": 0,
+        "estimate_covered_count": 0,
+        "confirmed_covered_count": 0,
         "up_count": 0,
         "down_count": 0,
         "flat_count": 0,
+        "session": session,
     }
     for fund in funds:
         code = fund["code"]
@@ -870,8 +911,7 @@ def build_summary():
         latest_official_nav = latest_nav_by_type(code, True)
         today_estimate_nav = estimate_nav if estimate_nav and estimate_nav["valuation_date"] == today else None
         today_official_nav = official_nav_on(code, today)
-        subject_source = today_estimate_nav or today_official_nav
-        subject_date = subject_source["valuation_date"] if subject_source else today
+        subject_date = today
         official_nav = today_official_nav
         prev_official = previous_official_nav(code, subject_date)
         prev_prev_official = previous_official_nav(code, prev_official["valuation_date"]) if prev_official else None
@@ -881,19 +921,18 @@ def build_summary():
         if not close_nav and today_estimate_nav:
             close_nav = today_estimate_nav
 
-        estimate_display_nav = close_nav if state == "B" else today_estimate_nav
+        use_close_estimate = session == "postmarket" or state == "B"
+        estimate_display_nav = close_nav if use_close_estimate and close_nav else today_estimate_nav
         display_nav = official_nav if state == "B" else estimate_display_nav
         display_pct = display_nav["pct"] if display_nav else 0
         nav_value = display_nav["nav"] if display_nav else (nav["nav"] if nav else 0)
         market_nav_value = latest_official_nav["nav"] if latest_official_nav else 0
         opening = opening_for(code)
         shares = confirmed_shares_current(code, opening, nav_value)
-        opening_date = opening["as_of_date"] if opening else ""
-        rows_after_opening = confirmed_trades_after_opening(code, opening)
-        pending_rows = pending_trades_today(code, opening)
-        pending_shares = sum(shares_delta(r, nav_value) for r in pending_rows)
-        pending_amount = -sum(cash_flow(r) for r in pending_rows)
-        net_invested = -sum(cash_flow(r) for r in rows_after_opening)
+        pending_rows = []
+        pending_shares = 0
+        pending_amount = 0
+        net_invested = 0
         market = shares * market_nav_value
         pnl = 0
 
@@ -902,19 +941,17 @@ def build_summary():
 
         estimate_pnl = row_pnl(subject_shares, today_estimate_nav, prev_official)
         close_pnl = row_pnl(subject_shares, close_nav, prev_official)
-        estimate_display_pnl = close_pnl if state == "B" else estimate_pnl
+        estimate_display_pnl = close_pnl if use_close_estimate and close_nav else estimate_pnl
         today_pnl = row_pnl(subject_shares, official_nav, prev_official)
         yesterday_pnl = row_pnl(yesterday_shares, prev_official, prev_prev_official)
-        latest_confirmed_pnl = confirmed_pnl_for_latest_official(code, opening, nav_value)
         if today_official_ready:
             totals["official_updated_count"] += 1
-        premarket_mode = (not market_started) and (not today_official_ready)
+        if shares > 0:
+            totals["position_count"] += 1
+        premarket_mode = (not trading_today or not market_started) and (not today_official_ready)
         if today_official_ready:
             confirmed_pnl = today_pnl
             confirmed_pnl_label = "今日确认盈亏"
-        elif not market_started:
-            confirmed_pnl = latest_confirmed_pnl
-            confirmed_pnl_label = "昨日确认盈亏"
         else:
             confirmed_pnl = None
             confirmed_pnl_label = "确认盈亏"
@@ -932,13 +969,19 @@ def build_summary():
         totals["market"] += market
         totals["net_invested"] += net_invested
         totals["pnl"] += pnl
-        totals["today_pnl"] += display_pnl or 0
-        totals["today_base"] += today_base
-        totals["estimate_today_pnl"] += estimate_display_pnl or 0
-        totals["estimate_today_base"] += today_base if estimate_display_pnl is not None else 0
+        if display_pnl is not None:
+            totals["blended_today_pnl"] += display_pnl
+            totals["blended_today_base"] += today_base
+        if estimate_display_pnl is not None:
+            totals["estimate_today_pnl"] += estimate_display_pnl
+            totals["estimate_today_base"] += today_base
+            if shares > 0:
+                totals["estimate_covered_count"] += 1
         if today_official_ready and today_pnl is not None:
             totals["actual_today_pnl"] = (totals["actual_today_pnl"] or 0) + today_pnl
             totals["actual_today_base"] += today_base
+            if shares > 0:
+                totals["confirmed_covered_count"] += 1
         if display_nav and display_pct > 0:
             totals["up_count"] += 1
         elif display_nav and display_pct < 0:
@@ -973,32 +1016,68 @@ def build_summary():
                 "close_nav": close_nav,
                 "premarket_mode": premarket_mode,
                 "state": state,
-                "state_label": "净值复盘" if state == "B" else "盘中估算",
-                "state_note": "15:00预估对比今日净值" if state == "B" else "实时预估对比昨日净值",
+                "state_label": (
+                    "净值复盘"
+                    if state == "B"
+                    else "休市"
+                    if not trading_today
+                    else "未开盘"
+                    if not market_started
+                    else "盘中估算"
+                ),
+                "state_note": (
+                    "东方财富转发的已披露净值"
+                    if state == "B"
+                    else "天天基金盘中估算，非基金公司官方数据"
+                ),
                 "subject_date": subject_date,
                 "subject_date_label": short_cn_date(subject_date),
                 "estimate_pnl": estimate_pnl,
                 "close_pnl": close_pnl,
                 "yesterday_pnl": yesterday_pnl,
-                "source_note": "非官方估算，用于盘中参考" if state == "A" else "正式净值，适合复盘和校准",
-                "nav_status": "正式净值" if state == "B" else "盘中估值",
+                "source_note": "天天基金盘中估算，非官方" if state == "A" else "东方财富转发的已披露净值",
+                "nav_status": "已披露净值" if state == "B" else "盘中估算",
                 "date_status": short_cn_date(subject_date),
                 "opening": opening,
             }
         )
     totals["return_rate"] = totals["pnl"] / totals["net_invested"] if totals["net_invested"] else 0
-    totals["today_return"] = totals["today_pnl"] / totals["today_base"] if totals["today_base"] else 0
     intraday_estimates = portfolio_estimated_intraday_series(today)
     if intraday_estimates:
         latest_intraday_estimate = intraday_estimates[-1]
         totals["estimate_today_pnl"] = latest_intraday_estimate["today_pnl"]
-        totals["estimate_today_return"] = (latest_intraday_estimate["today_return"] or 0) / 100
+        totals["estimate_today_return"] = (
+            latest_intraday_estimate["today_return"] / 100
+            if latest_intraday_estimate["today_return"] is not None
+            else None
+        )
     else:
-        totals["estimate_today_return"] = totals["estimate_today_pnl"] / totals["estimate_today_base"] if totals["estimate_today_base"] else 0
+        totals["estimate_today_return"] = (
+            totals["estimate_today_pnl"] / totals["estimate_today_base"]
+            if totals["estimate_today_base"] and totals["estimate_covered_count"]
+            else None
+        )
+    if not totals["estimate_covered_count"]:
+        totals["estimate_today_pnl"] = None
     totals["actual_today_return"] = (
         totals["actual_today_pnl"] / totals["actual_today_base"]
         if totals["actual_today_pnl"] is not None and totals["actual_today_base"]
         else None
+    )
+    totals["blended_today_return"] = (
+        totals["blended_today_pnl"] / totals["blended_today_base"]
+        if totals["blended_today_base"]
+        else None
+    )
+    totals["today_pnl"] = totals["estimate_today_pnl"]
+    totals["today_return"] = totals["estimate_today_return"]
+    totals["estimate_complete"] = (
+        totals["position_count"] > 0
+        and totals["estimate_covered_count"] == totals["position_count"]
+    )
+    totals["actual_complete"] = (
+        totals["position_count"] > 0
+        and totals["confirmed_covered_count"] == totals["position_count"]
     )
     return cards, totals
 
@@ -1372,9 +1451,6 @@ def today_detail():
     init_db()
     today = cn_today()
     cards, totals = build_summary()
-    if not market_session_started():
-        totals["today_pnl"] = 0
-        totals["today_return"] = 0
     return render_template(
         "today.html",
         today=today,
@@ -1450,6 +1526,7 @@ def save_opening():
             "insert into funds (code, name, fund_type, reference, note) values (?, ?, '', '', '')",
             (code, profile["name"] or code),
         )
+    now_text = datetime.now().isoformat(timespec="seconds")
     db().execute(
         """
         insert into opening_positions (code, as_of_date, shares, cost_amount, nav, note, created_at)
@@ -1469,7 +1546,19 @@ def save_opening():
             float(request.form.get("cost_amount") or 0),
             float(request.form.get("nav") or 0),
             request.form.get("note", ""),
-            datetime.now().isoformat(timespec="seconds"),
+            now_text,
+        ),
+    )
+    db().execute(
+        """
+        insert into position_history (code, as_of_date, shares, created_at)
+        values (?, ?, ?, ?)
+        """,
+        (
+            code,
+            request.form["as_of_date"],
+            float(request.form.get("shares") or 0),
+            now_text,
         ),
     )
     db().commit()

@@ -36,20 +36,20 @@
     </div>
 
     <section class="metrics">
-      {% set pnl_color_value = totals.actual_today_pnl if totals.actual_today_pnl is not none else totals.estimate_today_pnl %}
-      {% set return_color_value = totals.actual_today_return if totals.actual_today_return is not none else totals.estimate_today_return %}
-      <a class="metric-link metric-main {{ 'gain' if pnl_color_value >= 0 else 'loss' }}" href="{{ url_for('today_detail') }}?metric=pnl">
-        <span>今日盈亏 <small>预估/实际</small></span>
+      {% set pnl_color_value = totals.estimate_today_pnl if totals.estimate_today_pnl is not none else totals.actual_today_pnl %}
+      {% set return_color_value = totals.estimate_today_return if totals.estimate_today_return is not none else totals.actual_today_return %}
+      <a class="metric-link metric-main {{ 'gain' if pnl_color_value is not none and pnl_color_value > 0 else 'loss' if pnl_color_value is not none and pnl_color_value < 0 else '' }}" href="{{ url_for('today_detail') }}?metric=pnl">
+        <span>今日盈亏 <small>预估 {{ totals.estimate_covered_count }}/{{ totals.position_count }} · 确认 {{ totals.confirmed_covered_count }}/{{ totals.position_count }}</small></span>
         <strong>
           <em class="money-value">{{ totals.estimate_today_pnl|money }}</em>
           <i>/</i>
           <em class="money-value">{{ totals.actual_today_pnl|money }}</em>
         </strong>
       </a>
-      <a class="metric-link {{ 'gain' if return_color_value >= 0 else 'loss' }}" href="{{ url_for('today_detail') }}?metric=return">
-        <span>今日收益率 <small>预估/实际</small></span>
+      <a class="metric-link {{ 'gain' if return_color_value is not none and return_color_value > 0 else 'loss' if return_color_value is not none and return_color_value < 0 else '' }}" href="{{ url_for('today_detail') }}?metric=return">
+        <span>今日收益率 <small>预估 {{ totals.estimate_covered_count }}/{{ totals.position_count }} · 确认 {{ totals.confirmed_covered_count }}/{{ totals.position_count }}</small></span>
         <strong>
-          <em>{{ "%.2f%%"|format(totals.estimate_today_return * 100) }}</em>
+          <em>{{ (totals.estimate_today_return * 100)|percent if totals.estimate_today_return is not none else "-" }}</em>
           <i>/</i>
           <em>{{ (totals.actual_today_return * 100)|percent if totals.actual_today_return is not none else "-" }}</em>
         </strong>
@@ -127,12 +127,12 @@
                     <b><a class="fund-link" href="{{ url_for('fund_detail', code=c.fund.code) }}">{{ c.fund.code }}</a></b>
                     <small>{{ c.fund.name }}</small>
                   </div>
-                  {% if not c.premarket_mode %}
-                    <span class="state-badge mobile-state {{ 'state-b' if c.state == 'B' else 'state-a' }}">{{ c.state_label }}</span>
+                  {% if c.state_label != "未开盘" %}
+                    <span class="state-badge mobile-state {{ 'state-b' if c.state == 'B' else 'state-a' }}" title="{{ c.state_note }}">{{ c.state_label }}</span>
                   {% endif %}
                 </td>
                 <td class="state-cell" data-label="状态">
-                  {% if c.premarket_mode %}-{% else %}<span class="state-badge {{ 'state-b' if c.state == 'B' else 'state-a' }}">{{ c.state_label }}</span>{% endif %}
+                  {% if c.state_label == "未开盘" %}-{% else %}<span class="state-badge {{ 'state-b' if c.state == 'B' else 'state-a' }}" title="{{ c.state_note }}">{{ c.state_label }}</span>{% endif %}
                 </td>
                 <td data-label="{{ '15:00预估净值' if c.state == 'B' else '实时预估净值' }}" class="num-cell estimate-cell estimate-start">
                   {% set left_nav = c.estimate_display_nav %}

@@ -24,13 +24,23 @@
     </header>
 
     <section class="metrics today-metrics">
-      <article class="metric-main {{ 'gain' if totals.today_pnl >= 0 else 'loss' }}">
-        <span>今日盈亏</span>
-        <strong class="money-value">{{ totals.today_pnl|money }}</strong>
+      {% set today_color_value = totals.estimate_today_pnl if totals.estimate_today_pnl is not none else totals.actual_today_pnl %}
+      {% set today_return_color = totals.estimate_today_return if totals.estimate_today_return is not none else totals.actual_today_return %}
+      <article class="metric-main {{ 'gain' if today_color_value is not none and today_color_value > 0 else 'loss' if today_color_value is not none and today_color_value < 0 else '' }}">
+        <span>今日盈亏 <small>预估/已确认 {{ totals.confirmed_covered_count }}/{{ totals.position_count }}</small></span>
+        <strong>
+          <em class="money-value">{{ totals.estimate_today_pnl|money }}</em>
+          <i>/</i>
+          <em class="money-value">{{ totals.actual_today_pnl|money }}</em>
+        </strong>
       </article>
-      <article class="{{ 'gain' if totals.today_return >= 0 else 'loss' }}">
-        <span>今日预估收益率</span>
-        <strong>{{ "%.2f%%"|format(totals.today_return * 100) }}</strong>
+      <article class="{{ 'gain' if today_return_color is not none and today_return_color > 0 else 'loss' if today_return_color is not none and today_return_color < 0 else '' }}">
+        <span>今日收益率 <small>预估/已确认</small></span>
+        <strong>
+          <em>{{ (totals.estimate_today_return * 100)|percent if totals.estimate_today_return is not none else "-" }}</em>
+          <i>/</i>
+          <em>{{ (totals.actual_today_return * 100)|percent if totals.actual_today_return is not none else "-" }}</em>
+        </strong>
       </article>
       <article>
         <span>当前市值</span>
@@ -55,7 +65,7 @@
     const privacyHidden = localStorage.getItem("fundPrivacyHidden") === "1";
     document.body.classList.toggle("privacy-on", privacyHidden);
     const config = {
-      pnl: { label: "今日盈亏", key: "today_pnl", unit: "" },
+      pnl: { label: "今日预估盈亏", key: "today_pnl", unit: "" },
       return: { label: "今日预估收益率", key: "today_return", unit: "%" },
       market: { label: "盘中预估市值", key: "market", unit: "" }
     }[metric] || { label: "今日盈亏", key: "today_pnl", unit: "" };
