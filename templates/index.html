@@ -48,7 +48,7 @@
       {% set pnl_color_value = totals.estimate_today_pnl if totals.estimate_today_pnl is not none else totals.actual_today_pnl %}
       {% set return_color_value = totals.estimate_today_return if totals.estimate_today_return is not none else totals.actual_today_return %}
       <a class="metric-link metric-main {{ 'gain' if pnl_color_value is not none and pnl_color_value > 0 else 'loss' if pnl_color_value is not none and pnl_color_value < 0 else '' }}" href="{{ url_for('today_detail') }}?metric=pnl">
-        <span>今日盈亏 <small>预估 {{ totals.estimate_covered_count }}/{{ totals.position_count }} · 确认 {{ totals.confirmed_covered_count }}/{{ totals.position_count }}</small></span>
+        <span>今日盈亏</span>
         <strong>
           <em class="money-value">{{ totals.estimate_today_pnl|money }}</em>
           <i>/</i>
@@ -56,7 +56,7 @@
         </strong>
       </a>
       <a class="metric-link {{ 'gain' if return_color_value is not none and return_color_value > 0 else 'loss' if return_color_value is not none and return_color_value < 0 else '' }}" href="{{ url_for('today_detail') }}?metric=return">
-        <span>今日收益率 <small>预估 {{ totals.estimate_covered_count }}/{{ totals.position_count }} · 确认 {{ totals.confirmed_covered_count }}/{{ totals.position_count }}</small></span>
+        <span>今日收益率</span>
         <strong>
           <em>{{ (totals.estimate_today_return * 100)|percent if totals.estimate_today_return is not none else "-" }}</em>
           <i>/</i>
