@@ -125,15 +125,18 @@
             </thead>
             <tbody>
             {% for c in cards %}
-              <tr>
+              <tr class="holding-row mobile-collapsed">
                 <td class="fund-cell" data-label="基金">
                   <div class="fund-main">
                     <b><a class="fund-link" href="{{ url_for('fund_detail', code=c.fund.code) }}">{{ c.fund.code }}</a></b>
                     <small>{{ c.fund.name }}</small>
                   </div>
-                  {% if c.state_label != "未开盘" %}
-                    <span class="state-badge mobile-state {{ 'state-b' if c.state == 'B' else 'state-a' }}" title="{{ c.state_note }}">{{ c.state_label }}</span>
-                  {% endif %}
+                  <div class="mobile-fund-tools">
+                    {% if c.state_label != "未开盘" %}
+                      <span class="state-badge mobile-state {{ 'state-b' if c.state == 'B' else 'state-a' }}" title="{{ c.state_note }}">{{ c.state_label }}</span>
+                    {% endif %}
+                    <button class="mobile-row-toggle" type="button" aria-expanded="false" aria-label="展开 {{ c.fund.code }} 详情">展开</button>
+                  </div>
                 </td>
                 <td class="state-cell" data-label="状态">
                   {% if c.state_label == "未开盘" %}-{% else %}<span class="state-badge {{ 'state-b' if c.state == 'B' else 'state-a' }}" title="{{ c.state_note }}">{{ c.state_label }}</span>{% endif %}
@@ -163,11 +166,11 @@
                     -
                   {% endif %}
                 </td>
-                <td data-label="{{ '今日涨跌幅' if c.state == 'B' else '昨日涨跌幅' }}" class="compare-cell confirmed-cell {{ 'gain' if right_nav and right_nav.pct >= 0 else 'loss' }}">
+                <td data-label="{{ '今日涨跌幅' if c.state == 'B' else '昨日涨跌幅' }}" class="compare-cell confirmed-cell mobile-secondary {{ 'gain' if right_nav and right_nav.pct >= 0 else 'loss' }}">
                   <b>{{ right_nav.pct|percent if right_nav else "-" }}</b>
                 </td>
                 {% set confirmed_pnl = c.confirmed_pnl %}
-                <td data-label="{{ c.confirmed_pnl_label }}" class="privacy-cell compare-cell confirmed-cell confirmed-end {{ 'gain' if confirmed_pnl is not none and confirmed_pnl >= 0 else 'loss' if confirmed_pnl is not none else '' }}">
+                <td data-label="{{ c.confirmed_pnl_label }}" class="privacy-cell compare-cell confirmed-cell confirmed-end mobile-secondary {{ 'gain' if confirmed_pnl is not none and confirmed_pnl >= 0 else 'loss' if confirmed_pnl is not none else '' }}">
                   <b class="money-value">{{ confirmed_pnl|money }}</b>
                 </td>
                 <td data-label="市值" class="privacy-cell">
@@ -177,13 +180,13 @@
                     <small class="pending-note">待确认 {{ c.pending_amount|money }}</small>
                   {% endif %}
                 </td>
-                <td data-label="份额" class="privacy-cell">
+                <td data-label="份额" class="privacy-cell mobile-secondary">
                   <span class="money-value">{{ c.shares|money }}</span>
                   {% if c.pending_count %}
                     <small class="pending-note">待确认 {{ c.pending_shares|money }}</small>
                   {% endif %}
                 </td>
-                <td data-label="操作" class="actions">
+                <td data-label="操作" class="actions mobile-secondary">
                   <div class="action-buttons">
                     <button
                       class="action-link edit-opening"
@@ -328,6 +331,16 @@
           asOfDate: button.dataset.asOfDate || "{{ default_opening_date }}",
           costAmount: button.dataset.costAmount || 0,
         });
+      });
+    });
+    document.querySelectorAll(".mobile-row-toggle").forEach(button => {
+      button.addEventListener("click", () => {
+        const row = button.closest(".holding-row");
+        if (!row) return;
+        const collapsed = row.classList.toggle("mobile-collapsed");
+        button.textContent = collapsed ? "展开" : "收起";
+        button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+        button.setAttribute("aria-label", `${collapsed ? "展开" : "收起"} ${row.querySelector(".fund-link")?.textContent || "基金"} 详情`);
       });
     });
     openingCodeDisplay?.addEventListener("blur", lookupFund);

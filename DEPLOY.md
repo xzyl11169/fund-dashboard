@@ -12,7 +12,7 @@
 
 - 一台小型云服务器。
 - 开放 `8765` 端口，或用 Nginx/HTTPS 反代。
-- 设置访问密码，避免任何人都能看你的持仓。
+- 设置设备访问令牌，避免任何人都能看或修改持仓。
 
 Docker 启动示例：
 
@@ -22,7 +22,8 @@ docker run -d \
   --name fund-dashboard \
   -p 8765:8765 \
   -v fund-dashboard-data:/data \
-  -e FUND_APP_PIN="换成你的访问密码" \
+  -e FUND_APP_TOKEN="换成长随机令牌" \
+  -e FUND_APP_SECRET="换成另一个长随机值" \
   fund-dashboard
 ```
 
@@ -32,13 +33,7 @@ docker run -d \
 http://你的服务器IP:8765
 ```
 
-用户名：
-
-```text
-fund
-```
-
-密码就是 `FUND_APP_PIN`。
+首次访问时在地址后添加 `?access=访问令牌`。验证成功后浏览器会长期记住该设备，并自动清理地址中的令牌。
 
 ### 方案 B：家里常开的 NAS / 迷你主机
 
@@ -70,6 +65,6 @@ fund_tracker.sqlite3
 
 ## 安全提醒
 
-- 上公网时一定要设置 `FUND_APP_PIN`。
+- 上公网时必须设置 `FUND_APP_TOKEN` 和 `FUND_APP_SECRET`。
 - 更稳妥的正式方案是加 HTTPS 域名和反向代理。
 - 不建议裸奔公开在互联网上。

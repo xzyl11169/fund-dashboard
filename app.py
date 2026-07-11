@@ -1220,7 +1220,11 @@ def build_summary():
                     else "盘中估算"
                 ),
                 "state_note": (
-                    "东方财富转发的已披露净值"
+                    "今日休市，无盘中估算"
+                    if not trading_today
+                    else "尚未开盘"
+                    if not market_started
+                    else "东方财富转发的已披露净值"
                     if state == "B"
                     else "天天基金盘中估算，非基金公司官方数据"
                 ),
@@ -1556,6 +1560,17 @@ def normalize_points(rows, label_key="date"):
     ]
 
 
+def aligned_compare_points(fund_rows, benchmark_rows):
+    fund_by_date = {row["date"]: row for row in fund_rows}
+    benchmark_by_date = {row["date"]: row for row in benchmark_rows}
+    common_dates = sorted(set(fund_by_date) & set(benchmark_by_date))
+    if not common_dates:
+        return normalize_points(fund_rows), []
+    aligned_fund = [fund_by_date[day] for day in common_dates]
+    aligned_benchmark = [benchmark_by_date[day] for day in common_dates]
+    return normalize_points(aligned_fund), normalize_points(aligned_benchmark)
+
+
 def build_compare_ranges(code, today_text):
     today_obj = datetime.strptime(today_text, "%Y-%m-%d").date()
     range_defs = [
@@ -1580,9 +1595,10 @@ def build_compare_ranges(code, today_text):
         fund_rows = [r for r in official_rows if r["date"] >= start]
         last_fund_date = fund_rows[-1]["date"] if fund_rows else today_text
         benchmark_rows = [r for r in hs300_rows if start <= r["date"] <= last_fund_date]
+        fund_points, benchmark_points = aligned_compare_points(fund_rows, benchmark_rows)
         compare[key] = {
-            "fund": normalize_points(fund_rows),
-            "benchmark": normalize_points(benchmark_rows),
+            "fund": fund_points,
+            "benchmark": benchmark_points,
         }
     return [{"key": key, "label": label, **compare[key]} for key, label in range_defs]
 

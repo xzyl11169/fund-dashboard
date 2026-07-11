@@ -1,4 +1,4 @@
-const CACHE_NAME = "fund-dashboard-v1";
+const CACHE_NAME = "fund-dashboard-v2";
 const STATIC_ASSETS = [
   "/static/style.css",
   "/static/manifest.webmanifest",

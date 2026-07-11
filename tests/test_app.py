@@ -260,6 +260,28 @@ class FundDashboardTests(unittest.TestCase):
 
         self.assertEqual(calls, {"intraday": 1, "profile": 0, "official": 0})
 
+    def test_benchmark_comparison_uses_common_dates(self):
+        fund_rows = [
+            {"date": "2026-07-01", "nav": 1.0},
+            {"date": "2026-07-03", "nav": 1.1},
+            {"date": "2026-07-06", "nav": 1.2},
+        ]
+        benchmark_rows = [
+            {"date": "2026-06-30", "nav": 100},
+            {"date": "2026-07-01", "nav": 101},
+            {"date": "2026-07-02", "nav": 102},
+            {"date": "2026-07-03", "nav": 103},
+        ]
+
+        fund_points, benchmark_points = fund_app.aligned_compare_points(
+            fund_rows, benchmark_rows
+        )
+
+        self.assertEqual([row["label"] for row in fund_points], ["2026-07-01", "2026-07-03"])
+        self.assertEqual(
+            [row["label"] for row in benchmark_points], ["2026-07-01", "2026-07-03"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

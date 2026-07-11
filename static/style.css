@@ -31,8 +31,13 @@ body {
 }
 
 .shell {
-  width: min(1888px, calc(100vw - 32px));
+  width: calc(100% - 32px);
+  max-width: 1888px;
   margin: 24px auto 42px;
+}
+
+.mobile-row-toggle {
+  display: none;
 }
 
 .app-header,
@@ -1152,7 +1157,8 @@ select {
 
 @media (max-width: 960px) {
   .shell {
-    width: min(100vw - 18px, 1700px);
+    width: calc(100% - 18px);
+    max-width: 1700px;
     margin: 12px auto 24px;
   }
 
@@ -1266,7 +1272,7 @@ select {
   }
 
   .shell {
-    width: calc(100vw - 12px);
+    width: calc(100% - 12px);
     margin: 8px auto 16px;
   }
 
@@ -1510,6 +1516,29 @@ select {
     font-size: 11px;
   }
 
+  .mobile-fund-tools {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .mobile-row-toggle {
+    display: inline-flex;
+    min-width: 0;
+    height: 22px;
+    padding: 0 7px;
+    border-color: var(--line);
+    background: #fff;
+    color: var(--subtle);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .holding-row.mobile-collapsed .mobile-secondary {
+    display: none !important;
+  }
+
   .state-cell {
     display: none !important;
   }
@@ -1615,7 +1644,7 @@ select {
   }
 
   .detail-shell {
-    width: calc(100vw - 12px);
+    width: calc(100% - 12px);
   }
 
   .modal-backdrop {
