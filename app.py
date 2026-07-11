@@ -1,15 +1,19 @@
 import json
+import hmac
+import math
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
 from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import requests
-from flask import Flask, Response, g, jsonify, redirect, render_template, request, send_from_directory, url_for
+from flask import Flask, Response, abort, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 
 try:
     import cn_stock_holidays as stock_holidays
@@ -25,11 +29,25 @@ else:  # pragma: no cover - fallback during bootstrap
 APP_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("FUND_DB_PATH", APP_DIR / "fund_tracker.sqlite3"))
 APP_PIN = os.environ.get("FUND_APP_PIN", "").strip()
+APP_TOKEN = os.environ.get("FUND_APP_TOKEN", "").strip()
 
 app = Flask(__name__)
-refresh_state = {"last_run": "", "last_error": "", "running": False}
+app.secret_key = os.environ.get("FUND_APP_SECRET", "").strip() or secrets.token_hex(32)
+refresh_state = {
+    "last_run": "",
+    "last_error": "",
+    "running": False,
+    "completed": 0,
+    "total": 0,
+    "phase": "",
+    "started_at": "",
+}
+refresh_state_lock = threading.Lock()
+background_state_lock = threading.Lock()
+background_started = False
 history_jobs = set()
 CN_TZ = ZoneInfo("Asia/Shanghai")
+FUND_CODE_PATTERN = re.compile(r"^\d{6}$")
 
 
 def cn_now():
@@ -102,6 +120,54 @@ def pct_bg_filter(value):
     return "background: #f8fafc;"
 
 
+@app.template_filter("sourcefmt")
+def source_filter(value):
+    value = value or ""
+    if "天天基金" in value:
+        return "天天基金盘中估算（非官方）"
+    if "东方财富" in value:
+        return "东方财富已披露净值"
+    return value
+
+
+def csrf_token():
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+
+app.jinja_env.globals["csrf_token"] = csrf_token
+
+
+def require_fund_code(value):
+    code = (value or "").strip()
+    if not FUND_CODE_PATTERN.fullmatch(code):
+        abort(400, "基金代码必须是6位数字")
+    return code
+
+
+def require_iso_date(value, field_name="日期", allow_future=False):
+    try:
+        parsed = datetime.strptime((value or "").strip(), "%Y-%m-%d").date()
+    except ValueError:
+        abort(400, f"{field_name}格式不正确")
+    if not allow_future and parsed > cn_now().date():
+        abort(400, f"{field_name}不能晚于今天")
+    return parsed
+
+
+def require_nonnegative_number(value, field_name):
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        abort(400, f"{field_name}必须是数字")
+    if not math.isfinite(number) or number < 0:
+        abort(400, f"{field_name}不能为负数或无效数字")
+    return number
+
+
 def eastmoney_get(url, timeout=10):
     headers = {
         "Accept": "application/json,text/plain,*/*",
@@ -123,18 +189,51 @@ def eastmoney_get(url, timeout=10):
 
 
 def authorized():
+    if APP_TOKEN:
+        cookie_token = request.cookies.get("fund_access", "")
+        if cookie_token and hmac.compare_digest(cookie_token, APP_TOKEN):
+            return True
     if not APP_PIN:
-        return True
+        return not APP_TOKEN
     auth = request.authorization
-    return bool(auth and auth.username in {"fund", "root"} and auth.password == APP_PIN)
+    return bool(
+        auth
+        and auth.username in {"fund", "root"}
+        and hmac.compare_digest(auth.password or "", APP_PIN)
+    )
 
 
 @app.before_request
 def require_pin():
     if request.path.startswith("/static/") or request.path == "/service-worker.js":
         return None
+    supplied_token = request.args.get("access", "")
+    if APP_TOKEN and supplied_token and hmac.compare_digest(supplied_token, APP_TOKEN):
+        args = request.args.to_dict(flat=True)
+        args.pop("access", None)
+        target = request.path
+        if args:
+            target = f"{target}?{urlencode(args)}"
+        response = redirect(target)
+        forwarded_https = request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+        response.set_cookie(
+            "fund_access",
+            APP_TOKEN,
+            max_age=365 * 24 * 60 * 60,
+            httponly=True,
+            secure=request.is_secure or forwarded_https,
+            samesite="Lax",
+        )
+        return response
     if authorized():
+        if request.method == "POST":
+            expected = session.get("csrf_token", "")
+            supplied = request.form.get("_csrf_token", "") or request.headers.get("X-CSRF-Token", "")
+            if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+                abort(400, "页面已过期，请刷新后重试")
         return None
+    if APP_TOKEN and not APP_PIN:
+        return Response("访问链接无效或设备授权已失效", 401, {"Cache-Control": "no-store"})
     return Response(
         "需要访问密码",
         401,
@@ -144,8 +243,10 @@ def require_pin():
 
 def db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
+        g.db = sqlite3.connect(DB_PATH, timeout=15)
         g.db.row_factory = sqlite3.Row
+        g.db.execute("pragma busy_timeout=15000")
+        g.db.execute("pragma foreign_keys=on")
     return g.db
 
 
@@ -158,7 +259,9 @@ def close_db(_exc):
 
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.execute("pragma busy_timeout=15000")
+    conn.execute("pragma journal_mode=wal")
     conn.executescript(
         """
         create table if not exists funds (
@@ -633,6 +736,8 @@ def market_session_started(now=None):
 
 def next_refresh_sleep(now=None):
     now = now or cn_now()
+    if not is_trading_day(now.date()):
+        return 3600
     minutes = market_minutes(now)
     if 9 * 60 + 20 <= minutes < 9 * 60 + 30:
         target = now.replace(hour=9, minute=30, second=0, microsecond=0)
@@ -644,7 +749,9 @@ def next_refresh_sleep(now=None):
         return max(60, int((target - now).total_seconds()))
     if 13 * 60 <= minutes <= 15 * 60 + 5:
         return 180
-    return 600
+    if 15 * 60 + 5 < minutes <= 23 * 60 + 30:
+        return 600
+    return 1800
 
 
 def insert_portfolio_tick(totals):
@@ -666,54 +773,141 @@ def insert_portfolio_tick(totals):
     db().commit()
 
 
-def refresh_all():
-    codes = [r["code"] for r in db().execute("select code from funds").fetchall()]
+def refresh_state_snapshot():
+    with refresh_state_lock:
+        return dict(refresh_state)
+
+
+def update_refresh_state(**values):
+    with refresh_state_lock:
+        refresh_state.update(values)
+
+
+def begin_refresh():
+    with refresh_state_lock:
+        if refresh_state["running"]:
+            return False
+        refresh_state.update(
+            {
+                "running": True,
+                "completed": 0,
+                "total": 0,
+                "phase": "准备刷新",
+                "started_at": cn_now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        return True
+
+
+def should_poll_official(now=None):
+    return trading_session(now) in {"closed", "premarket", "postmarket"}
+
+
+def update_fund_name(code, name):
+    if not name or name == code:
+        return
+    row = db().execute("select name from funds where code=?", (code,)).fetchone()
+    if row and (not row["name"] or row["name"] == code):
+        db().execute("update funds set name=? where code=?", (name, code))
+        db().commit()
+
+
+def refresh_all(force=False, state_started=False):
+    if not state_started and not begin_refresh():
+        return False
     errors = []
-    fetch_intraday_now = in_intraday_refresh_window()
-    for code in codes:
+    try:
+        funds = db().execute("select code, name from funds order by code").fetchall()
+        update_refresh_state(total=len(funds))
+        fetch_intraday_now = in_intraday_refresh_window()
+        fetch_official_now = force or should_poll_official()
+        for index, fund in enumerate(funds, start=1):
+            code = fund["code"]
+            update_refresh_state(phase=f"正在更新 {code}")
+            intraday = None
+            if fetch_intraday_now:
+                try:
+                    intraday = fetch_intraday(code)
+                    upsert_valuation(intraday)
+                    insert_valuation_tick(intraday)
+                    if should_capture_close_snapshot(intraday):
+                        capture_close_snapshot(intraday)
+                    update_fund_name(code, intraday.get("name"))
+                except Exception as exc:
+                    errors.append(f"{code} 盘中估算失败: {exc}")
+            if not fund["name"] or fund["name"] == code:
+                try:
+                    if intraday:
+                        update_fund_name(code, intraday.get("name"))
+                    else:
+                        update_fund_name_from_profile(code)
+                except Exception as exc:
+                    errors.append(f"{code} 名称更新失败: {exc}")
+            if fetch_official_now:
+                try:
+                    upsert_valuation(fetch_latest_official(code))
+                except Exception as exc:
+                    errors.append(f"{code} 已披露净值失败: {exc}")
+            update_refresh_state(completed=index)
         if fetch_intraday_now:
             try:
-                intraday = fetch_intraday(code)
-                upsert_valuation(intraday)
-                insert_valuation_tick(intraday)
-                if should_capture_close_snapshot(intraday):
-                    capture_close_snapshot(intraday)
+                _cards, totals = build_summary()
+                insert_portfolio_tick(totals)
             except Exception as exc:
-                errors.append(f"{code} 盘中估值失败: {exc}")
-        try:
-            update_fund_name_from_profile(code)
-        except Exception as exc:
-            errors.append(f"{code} 名称更新失败: {exc}")
-        try:
-            upsert_valuation(fetch_latest_official(code))
-        except Exception as exc:
-            errors.append(f"{code} 正式净值失败: {exc}")
-    try:
-        _cards, totals = build_summary()
-        insert_portfolio_tick(totals)
+                errors.append(f"组合快照失败: {exc}")
     except Exception as exc:
-        errors.append(f"组合快照失败: {exc}")
-    refresh_state["last_run"] = cn_now().strftime("%Y-%m-%d %H:%M:%S")
-    refresh_state["last_error"] = "；".join(errors[-4:])
+        errors.append(f"刷新失败: {exc}")
+    finally:
+        update_refresh_state(
+            last_run=cn_now().strftime("%Y-%m-%d %H:%M:%S"),
+            last_error="；".join(errors[-6:]),
+            running=False,
+            phase="部分数据未更新" if errors else "刷新完成",
+        )
+    return True
+
+
+def start_refresh_async(force=True):
+    if not begin_refresh():
+        return False
+
+    def worker():
+        try:
+            with app.app_context():
+                init_db()
+                refresh_all(force=force, state_started=True)
+        except Exception as exc:
+            update_refresh_state(
+                last_run=cn_now().strftime("%Y-%m-%d %H:%M:%S"),
+                last_error=str(exc),
+                running=False,
+                phase="刷新失败",
+            )
+
+    threading.Thread(target=worker, daemon=True).start()
+    return True
 
 
 def background_refresh():
-    if refresh_state["running"]:
-        return
-    refresh_state["running"] = True
+    global background_started
+    with background_state_lock:
+        if background_started:
+            return
+        background_started = True
 
     def loop():
+        first_run = True
         while True:
             try:
                 with app.app_context():
                     init_db()
-                    refresh_all()
+                    refresh_all(force=first_run)
             except Exception as exc:
-                refresh_state["last_error"] = str(exc)
+                update_refresh_state(last_error=str(exc), running=False, phase="刷新失败")
+            first_run = False
             time.sleep(next_refresh_sleep())
 
-    thread = threading.Thread(target=loop, daemon=True)
-    thread.start()
+    threading.Thread(target=loop, daemon=True).start()
 
 
 def cash_flow(row):
@@ -1146,7 +1340,10 @@ def warm_detail_history_async(code):
                 init_db()
                 ensure_official_history(code)
                 ensure_hs300_history()
-                refresh_state["last_run"] = cn_now().strftime("%Y-%m-%d %H:%M:%S")
+                update_refresh_state(
+                    last_run=cn_now().strftime("%Y-%m-%d %H:%M:%S"),
+                    phase="历史数据已补齐",
+                )
         finally:
             history_jobs.discard(job_key)
 
@@ -1418,14 +1615,14 @@ def index():
         edit_opening=edit_opening,
         today=cn_today(),
         default_opening_date=previous_trading_day().isoformat(),
-        refresh_state=refresh_state,
+        refresh_state=refresh_state_snapshot(),
     )
 
 
 @app.get("/funds/<code>")
 def fund_detail(code):
     init_db()
-    code = code.strip()
+    code = require_fund_code(code)
     fund = db().execute("select * from funds where code=?", (code,)).fetchone()
     if not fund:
         return redirect(url_for("index"))
@@ -1442,7 +1639,7 @@ def fund_detail(code):
         official_history=official_series(code),
         latest_nav=latest_nav(code),
         history_error=history_error,
-        refresh_state=refresh_state,
+        refresh_state=refresh_state_snapshot(),
     )
 
 
@@ -1456,22 +1653,30 @@ def today_detail():
         today=today,
         series=portfolio_intraday_series(today),
         totals=totals,
-        refresh_state=refresh_state,
+        refresh_state=refresh_state_snapshot(),
     )
 
 
 @app.get("/api/state")
 def api_state():
-    return jsonify(refresh_state)
+    return jsonify(refresh_state_snapshot())
 
 
 @app.post("/funds")
 def add_fund():
-    code = request.form["code"].strip()
-    typed_name = request.form["name"].strip()
+    code = require_fund_code(request.form.get("code"))
+    typed_name = request.form.get("name", "").strip()[:100]
     profile = fetch_fund_profile(code) if not typed_name else {"name": typed_name}
     db().execute(
-        "insert or replace into funds (code, name, fund_type, reference, note) values (?, ?, ?, ?, ?)",
+        """
+        insert into funds (code, name, fund_type, reference, note)
+        values (?, ?, ?, ?, ?)
+        on conflict(code) do update set
+          name=excluded.name,
+          fund_type=excluded.fund_type,
+          reference=excluded.reference,
+          note=excluded.note
+        """,
         (
             code,
             typed_name or profile["name"] or code,
@@ -1486,40 +1691,21 @@ def add_fund():
 
 @app.get("/api/fund/<code>")
 def fund_profile(code):
-    return jsonify(fetch_fund_profile(code.strip()))
+    return jsonify(fetch_fund_profile(require_fund_code(code)))
 
 
 @app.post("/trades")
 def add_trade():
-    amount = float(request.form.get("amount") or 0)
-    shares = float(request.form.get("shares") or 0)
-    nav = float(request.form.get("nav") or 0)
-    if not shares and amount and nav and request.form["side"] in ("买入", "赎回"):
-        shares = amount / nav
-    db().execute(
-        """
-        insert into trades (trade_date, code, side, amount, shares, nav, fee, note, created_at)
-        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            request.form["trade_date"],
-            request.form["code"],
-            request.form["side"],
-            amount,
-            shares,
-            nav,
-            float(request.form.get("fee") or 0),
-            request.form.get("note", ""),
-            datetime.now().isoformat(timespec="seconds"),
-        ),
-    )
-    db().commit()
-    return redirect(url_for("index"))
+    abort(410, "交易录入已停用，请直接使用改份额")
 
 
 @app.post("/opening")
 def save_opening():
-    code = request.form["code"].strip()
+    code = require_fund_code(request.form.get("code"))
+    as_of_day = require_iso_date(request.form.get("as_of_date"), "持仓日期")
+    if not is_trading_day(as_of_day):
+        abort(400, "持仓日期必须是交易日")
+    shares = require_nonnegative_number(request.form.get("shares"), "持有份额")
     if not db().execute("select code from funds where code=?", (code,)).fetchone():
         profile = fetch_fund_profile(code)
         db().execute(
@@ -1541,11 +1727,11 @@ def save_opening():
         """,
         (
             code,
-            request.form["as_of_date"],
-            float(request.form.get("shares") or 0),
-            float(request.form.get("cost_amount") or 0),
-            float(request.form.get("nav") or 0),
-            request.form.get("note", ""),
+            as_of_day.isoformat(),
+            shares,
+            0,
+            0,
+            request.form.get("note", "")[:200],
             now_text,
         ),
     )
@@ -1556,8 +1742,8 @@ def save_opening():
         """,
         (
             code,
-            request.form["as_of_date"],
-            float(request.form.get("shares") or 0),
+            as_of_day.isoformat(),
+            shares,
             now_text,
         ),
     )
@@ -1567,9 +1753,10 @@ def save_opening():
 
 @app.post("/funds/<code>/delete")
 def delete_fund(code):
-    code = code.strip()
+    code = require_fund_code(code)
     db().execute("delete from trades where code=?", (code,))
     db().execute("delete from opening_positions where code=?", (code,))
+    db().execute("delete from position_history where code=?", (code,))
     db().execute("delete from valuations where code=?", (code,))
     db().execute("delete from valuation_ticks where code=?", (code,))
     db().execute("delete from close_snapshots where code=?", (code,))
@@ -1580,7 +1767,9 @@ def delete_fund(code):
 
 @app.post("/refresh")
 def refresh():
-    refresh_all()
+    started = start_refresh_async(force=True)
+    if request.accept_mimetypes.best == "application/json":
+        return jsonify({"started": started, **refresh_state_snapshot()}), 202 if started else 200
     return redirect(url_for("index"))
 
 

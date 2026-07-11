@@ -36,25 +36,16 @@ iStore -> Docker / Docker 管理
 C:\Users\Administrator\Documents\Codex\2026-07-02\a\work\fund_dashboard\fund_tracker.sqlite3
 ```
 
-## 修改访问密码
+## 配置设备访问链接
 
-打开 `docker-compose.yml`，把这一行改掉：
+复制 `.env.example` 为 `.env`，为下面两项填写不同的长随机值：
 
-```yaml
-FUND_APP_PIN: "change-this-password"
+```env
+FUND_APP_TOKEN=设备访问令牌
+FUND_APP_SECRET=会话签名密钥
 ```
 
-例如：
-
-```yaml
-FUND_APP_PIN: "你的密码"
-```
-
-打开页面时用户名固定是：
-
-```text
-fund
-```
+首次访问时在地址后添加 `?access=设备访问令牌`。验证成功后 Safari 会长期记住该设备并自动清理地址中的令牌，不需要每天登录。
 
 ## 启动
 
@@ -78,8 +69,6 @@ iPhone Safari 打开：
 ```text
 http://192.168.100.1:8765
 ```
-
-输入用户名 `fund` 和你设置的密码。
 
 然后 Safari 分享菜单选择“添加到主屏幕”。
 

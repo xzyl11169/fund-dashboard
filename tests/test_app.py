@@ -18,6 +18,15 @@ class FundDashboardTests(unittest.TestCase):
         fund_app.init_db()
         self.context = fund_app.app.app_context()
         self.context.push()
+        fund_app.update_refresh_state(
+            last_run="",
+            last_error="",
+            running=False,
+            completed=0,
+            total=0,
+            phase="",
+            started_at="",
+        )
 
     def tearDown(self):
         self.context.pop()
@@ -147,6 +156,109 @@ class FundDashboardTests(unittest.TestCase):
 
         opening = fund_app.opening_for("000001")
         self.assertEqual(fund_app.shares_current("000001", opening), 100)
+
+    def test_opening_requires_csrf_and_records_history(self):
+        self.add_position("000001")
+        client = fund_app.app.test_client()
+
+        missing = client.post(
+            "/opening",
+            data={"code": "000001", "as_of_date": "2026-07-09", "shares": "123.45"},
+        )
+        self.assertEqual(missing.status_code, 400)
+
+        client.get("/")
+        with client.session_transaction() as browser_session:
+            token = browser_session["csrf_token"]
+        saved = client.post(
+            "/opening",
+            data={
+                "_csrf_token": token,
+                "code": "000001",
+                "as_of_date": "2026-07-09",
+                "shares": "123.45",
+            },
+        )
+        self.assertEqual(saved.status_code, 302)
+        opening = fund_app.opening_for("000001")
+        self.assertEqual(opening["shares"], 123.45)
+        history_rows = fund_app.db().execute(
+            "select shares from position_history where code='000001' order by id"
+        ).fetchall()
+        self.assertEqual([row["shares"] for row in history_rows], [100, 123.45])
+
+    def test_invalid_opening_is_rejected(self):
+        client = fund_app.app.test_client()
+        client.get("/")
+        with client.session_transaction() as browser_session:
+            token = browser_session["csrf_token"]
+        response = client.post(
+            "/opening",
+            data={
+                "_csrf_token": token,
+                "code": "bad-code",
+                "as_of_date": "not-a-date",
+                "shares": "-1",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(fund_app.db().execute("select count(*) from funds").fetchone()[0], 0)
+
+    def test_only_one_refresh_can_run(self):
+        self.assertTrue(fund_app.begin_refresh())
+        self.assertFalse(fund_app.begin_refresh())
+        fund_app.update_refresh_state(running=False)
+
+    def test_device_access_link_sets_persistent_cookie(self):
+        client = fund_app.app.test_client()
+        with (
+            patch.object(fund_app, "APP_TOKEN", "device-secret"),
+            patch.object(fund_app, "APP_PIN", ""),
+        ):
+            self.assertEqual(client.get("/").status_code, 401)
+            unlocked = client.get("/?access=device-secret")
+            self.assertEqual(unlocked.status_code, 302)
+            self.assertIn("fund_access=", unlocked.headers.get("Set-Cookie", ""))
+            self.assertEqual(client.get("/").status_code, 200)
+
+    def test_market_refresh_reuses_intraday_name_data(self):
+        self.add_position("000001")
+        fund_app.db().execute("update funds set name='测试基金' where code='000001'")
+        fund_app.db().commit()
+        self.add_nav("000001", "2026-07-09", 1, 0, True)
+        now = datetime(2026, 7, 10, 10, 0, tzinfo=CN_TZ)
+        calls = {"intraday": 0, "profile": 0, "official": 0}
+
+        def fake_intraday(code):
+            calls["intraday"] += 1
+            return {
+                "code": code,
+                "name": code,
+                "date": "2026-07-10",
+                "nav": 1.1,
+                "pct": 10,
+                "source": "estimate",
+                "quoted_at": "2026-07-10 10:00",
+                "is_official": 0,
+            }
+
+        def fake_profile(code):
+            calls["profile"] += 1
+            return {"code": code, "name": code}
+
+        def fake_official(code):
+            calls["official"] += 1
+            raise AssertionError("盘中后台刷新不应重复查询正式净值")
+
+        with (
+            patch.object(fund_app, "cn_now", return_value=now),
+            patch.object(fund_app, "fetch_intraday", side_effect=fake_intraday),
+            patch.object(fund_app, "fetch_fund_profile", side_effect=fake_profile),
+            patch.object(fund_app, "fetch_latest_official", side_effect=fake_official),
+        ):
+            fund_app.refresh_all()
+
+        self.assertEqual(calls, {"intraday": 1, "profile": 0, "official": 0})
 
 
 if __name__ == "__main__":

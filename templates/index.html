@@ -26,14 +26,18 @@
         <span>{{ refresh_state.last_run or "尚未刷新" }}</span>
         <button id="privacy-toggle" class="ghost-button" type="button" aria-pressed="false">隐藏市值</button>
         <form id="refresh-form" action="/refresh" method="post">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
           <button class="primary" type="submit">刷新</button>
         </form>
       </div>
     </header>
     <div id="refresh-progress" class="refresh-progress" aria-hidden="true">
       <div class="refresh-progress-bar"></div>
-      <span>正在刷新估值...</span>
+      <span id="refresh-progress-text">正在刷新...</span>
     </div>
+    {% if refresh_state.last_error %}
+      <div class="refresh-warning" title="{{ refresh_state.last_error }}">部分数据暂未更新，系统会继续重试。</div>
+    {% endif %}
 
     <section class="metrics">
       {% set pnl_color_value = totals.estimate_today_pnl if totals.estimate_today_pnl is not none else totals.actual_today_pnl %}
@@ -104,8 +108,8 @@
               <tr class="group-row">
                 <th rowspan="2">基金</th>
                 <th rowspan="2">状态</th>
-                <th colspan="3" class="estimate-group">预估区</th>
-                <th colspan="3" class="confirmed-group">确认区</th>
+                <th colspan="3" class="estimate-group" title="天天基金盘中估算，非基金公司官方数据">预估区</th>
+                <th colspan="3" class="confirmed-group" title="东方财富转发的已披露净值">确认区</th>
                 <th rowspan="2" class="privacy-col">市值/仓位</th>
                 <th rowspan="2" class="privacy-col">份额</th>
                 <th rowspan="2" class="actions-head">操作</th>
@@ -191,6 +195,7 @@
                       data-cost-amount="{{ c.opening.cost_amount if c.opening else 0 }}"
                     >改份额</button>
                     <form action="{{ url_for('delete_fund', code=c.fund.code) }}" method="post" onsubmit="return confirm('删除 {{ c.fund.code }} 及其记录？');">
+                      <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                       <button class="danger" type="submit">删除</button>
                     </form>
                   </div>
@@ -219,6 +224,7 @@
         <button id="close-position-modal" class="ghost-button" type="button">关闭</button>
       </div>
       <form id="position-form" action="/opening" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="code" id="opening-code" value="">
         <input type="hidden" name="cost_amount" id="opening-cost-amount" value="0">
         <label>基金代码
@@ -341,26 +347,61 @@
       sharesInput?.select();
     }
 
-    refreshForm?.addEventListener("submit", () => {
+    const refreshProgressText = document.querySelector("#refresh-progress-text");
+    const refreshProgressBar = document.querySelector(".refresh-progress-bar");
+    const initialLastRun = "{{ refresh_state.last_run or '' }}";
+
+    function renderRefreshState(state) {
+      if (!state?.running) return;
       refreshProgress?.classList.add("active");
+      refreshProgress?.setAttribute("aria-hidden", "false");
+      const completed = Number(state.completed || 0);
+      const total = Number(state.total || 0);
+      if (refreshProgressText) {
+        refreshProgressText.textContent = total ? `正在刷新 ${completed}/${total}` : (state.phase || "正在刷新...");
+      }
+      if (refreshProgressBar && total) {
+        refreshProgressBar.classList.add("determinate");
+        refreshProgressBar.style.setProperty("--refresh-percent", `${Math.min(100, completed / total * 100)}%`);
+      }
+    }
+
+    refreshForm?.addEventListener("submit", async event => {
+      event.preventDefault();
       const button = refreshForm.querySelector("button");
       if (button) {
         button.disabled = true;
         button.textContent = "刷新中";
       }
+      renderRefreshState({ running: true, phase: "准备刷新" });
+      try {
+        const response = await fetch(refreshForm.action, {
+          method: "POST",
+          body: new FormData(refreshForm),
+          headers: { "Accept": "application/json" },
+        });
+        const state = await response.json();
+        renderRefreshState(state);
+      } catch {
+        if (refreshProgressText) refreshProgressText.textContent = "刷新启动失败，请稍后重试";
+        if (button) {
+          button.disabled = false;
+          button.textContent = "刷新";
+        }
+      }
     });
 
-    const initialLastRun = "{{ refresh_state.last_run or '' }}";
     setInterval(async () => {
       if (document.hidden) return;
       try {
         const res = await fetch("/api/state", { cache: "no-store" });
         const state = await res.json();
+        renderRefreshState(state);
         if (state.last_run && state.last_run !== initialLastRun) {
           location.reload();
         }
       } catch {}
-    }, 60000);
+    }, 5000);
   </script>
 </body>
 </html>
