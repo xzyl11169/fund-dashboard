@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from flask import Flask, Response, abort, g, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
 
 try:
     import cn_stock_holidays as stock_holidays
@@ -30,6 +31,8 @@ APP_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("FUND_DB_PATH", APP_DIR / "fund_tracker.sqlite3"))
 APP_PIN = os.environ.get("FUND_APP_PIN", "").strip()
 APP_TOKEN = os.environ.get("FUND_APP_TOKEN", "").strip()
+ADMIN_USERNAME = os.environ.get("FUND_ADMIN_USERNAME", "admin").strip() or "admin"
+ADMIN_PASSWORD = os.environ.get("FUND_ADMIN_PASSWORD", "").strip()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FUND_APP_SECRET", "").strip() or secrets.token_hex(32)
@@ -48,6 +51,8 @@ background_started = False
 history_jobs = set()
 CN_TZ = ZoneInfo("Asia/Shanghai")
 FUND_CODE_PATTERN = re.compile(r"^\d{6}$")
+schema_lock = threading.Lock()
+schema_ready_path = ""
 
 
 def cn_now():
@@ -168,6 +173,13 @@ def require_nonnegative_number(value, field_name):
     return number
 
 
+def active_user_id():
+    user = current_user()
+    if user is None:
+        abort(401, "请先登录")
+    return user["id"]
+
+
 def eastmoney_get(url, timeout=10):
     headers = {
         "Accept": "application/json,text/plain,*/*",
@@ -188,24 +200,30 @@ def eastmoney_get(url, timeout=10):
     raise last_exc
 
 
-def authorized():
-    if APP_TOKEN:
-        cookie_token = request.cookies.get("fund_access", "")
-        if cookie_token and hmac.compare_digest(cookie_token, APP_TOKEN):
-            return True
-    if not APP_PIN:
-        return not APP_TOKEN
-    auth = request.authorization
-    return bool(
-        auth
-        and auth.username in {"fund", "root"}
-        and hmac.compare_digest(auth.password or "", APP_PIN)
-    )
+def current_user():
+    user_id = session.get("user_id")
+    if not user_id:
+        return None
+    user = db().execute(
+        "select * from users where id=? and enabled=1",
+        (user_id,),
+    ).fetchone()
+    if user is None:
+        session.pop("user_id", None)
+    return user
+
+
+def safe_next_path(value):
+    value = (value or "/").strip()
+    return value if value.startswith("/") and not value.startswith("//") else "/"
 
 
 @app.before_request
-def require_pin():
+def require_login():
     if request.path.startswith("/static/") or request.path == "/service-worker.js":
+        return None
+    init_db()
+    if request.endpoint in {"login", "service_worker"}:
         return None
     supplied_token = request.args.get("access", "")
     if APP_TOKEN and supplied_token and hmac.compare_digest(supplied_token, APP_TOKEN):
@@ -214,31 +232,17 @@ def require_pin():
         target = request.path
         if args:
             target = f"{target}?{urlencode(args)}"
-        response = redirect(target)
-        forwarded_https = request.headers.get("X-Forwarded-Proto", "").lower() == "https"
-        response.set_cookie(
-            "fund_access",
-            APP_TOKEN,
-            max_age=365 * 24 * 60 * 60,
-            httponly=True,
-            secure=request.is_secure or forwarded_https,
-            samesite="Lax",
-        )
-        return response
-    if authorized():
-        if request.method == "POST":
-            expected = session.get("csrf_token", "")
-            supplied = request.form.get("_csrf_token", "") or request.headers.get("X-CSRF-Token", "")
-            if not expected or not supplied or not hmac.compare_digest(expected, supplied):
-                abort(400, "页面已过期，请刷新后重试")
-        return None
-    if APP_TOKEN and not APP_PIN:
-        return Response("访问链接无效或设备授权已失效", 401, {"Cache-Control": "no-store"})
-    return Response(
-        "需要访问密码",
-        401,
-        {"WWW-Authenticate": 'Basic realm="Fund Dashboard"'},
-    )
+        return redirect(url_for("login", next=target, token_verified="1"))
+    if current_user() is None:
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "请先登录"}), 401
+        return redirect(url_for("login", next=request.full_path))
+    if request.method == "POST":
+        expected = session.get("csrf_token", "")
+        supplied = request.form.get("_csrf_token", "") or request.headers.get("X-CSRF-Token", "")
+        if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+            abort(400, "页面已过期，请刷新后重试")
+    return None
 
 
 def db():
@@ -260,6 +264,7 @@ def close_db(_exc):
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
     conn.execute("pragma busy_timeout=15000")
     conn.execute("pragma journal_mode=wal")
     conn.executescript(
@@ -357,6 +362,69 @@ def init_db():
           primary key(index_code, valuation_date)
         );
 
+        create table if not exists users (
+          id integer primary key autoincrement,
+          username text not null unique,
+          display_name text not null,
+          password_hash text not null,
+          role text not null default 'user',
+          enabled integer not null default 1,
+          created_at text not null
+        );
+
+        create table if not exists app_meta (
+          key text primary key,
+          value text not null
+        );
+
+        create table if not exists user_funds (
+          id integer primary key autoincrement,
+          user_id integer not null,
+          code text not null,
+          name text not null,
+          fund_type text default '',
+          reference text default '',
+          note text default '',
+          unique(user_id, code),
+          foreign key(user_id) references users(id)
+        );
+
+        create table if not exists user_opening_positions (
+          id integer primary key autoincrement,
+          user_id integer not null,
+          code text not null,
+          as_of_date text not null,
+          shares real not null,
+          cost_amount real not null,
+          nav real default 0,
+          note text default '',
+          created_at text not null,
+          unique(user_id, code),
+          foreign key(user_id) references users(id)
+        );
+
+        create table if not exists user_position_history (
+          id integer primary key autoincrement,
+          user_id integer not null,
+          code text not null,
+          as_of_date text not null,
+          shares real not null,
+          created_at text not null,
+          foreign key(user_id) references users(id)
+        );
+
+        create table if not exists user_portfolio_ticks (
+          id integer primary key autoincrement,
+          user_id integer not null,
+          sampled_at text not null,
+          snapshot_date text not null,
+          today_pnl real default 0,
+          today_return real default 0,
+          market real default 0,
+          unique(user_id, sampled_at),
+          foreign key(user_id) references users(id)
+        );
+
         create index if not exists idx_valuations_code_official_date
           on valuations(code, is_official, valuation_date desc, id desc);
         create index if not exists idx_ticks_code_date_official_quote
@@ -365,6 +433,14 @@ def init_db():
           on trades(code, trade_date, id);
         create index if not exists idx_position_history_code_date_created
           on position_history(code, as_of_date, created_at, id);
+        create index if not exists idx_user_funds_user_code
+          on user_funds(user_id, code);
+        create index if not exists idx_user_opening_user_code
+          on user_opening_positions(user_id, code);
+        create index if not exists idx_user_history_user_code_date
+          on user_position_history(user_id, code, as_of_date, created_at, id);
+        create index if not exists idx_user_portfolio_user_date
+          on user_portfolio_ticks(user_id, snapshot_date, sampled_at);
         """
     )
     conn.execute(
@@ -377,6 +453,65 @@ def init_db():
         )
         """
     )
+    admin_password = ADMIN_PASSWORD or secrets.token_urlsafe(18)
+    admin = conn.execute("select * from users where username=?", (ADMIN_USERNAME,)).fetchone()
+    if admin is None:
+        conn.execute(
+            """
+            insert into users (username, display_name, password_hash, role, enabled, created_at)
+            values (?, ?, ?, 'admin', 1, ?)
+            """,
+            (
+                ADMIN_USERNAME,
+                "本人",
+                generate_password_hash(admin_password),
+                cn_now().isoformat(timespec="seconds"),
+            ),
+        )
+        admin = conn.execute("select * from users where username=?", (ADMIN_USERNAME,)).fetchone()
+    migrated = conn.execute(
+        "select value from app_meta where key='user_data_migrated_v1'"
+    ).fetchone()
+    if not migrated:
+        admin_id = admin["id"]
+        conn.execute(
+            """
+            insert or ignore into user_funds
+              (user_id, code, name, fund_type, reference, note)
+            select ?, code, name, fund_type, reference, note from funds
+            """,
+            (admin_id,),
+        )
+        conn.execute(
+            """
+            insert or ignore into user_opening_positions
+              (user_id, code, as_of_date, shares, cost_amount, nav, note, created_at)
+            select ?, code, as_of_date, shares, cost_amount, nav, note, created_at
+            from opening_positions
+            """,
+            (admin_id,),
+        )
+        conn.execute(
+            """
+            insert into user_position_history
+              (user_id, code, as_of_date, shares, created_at)
+            select ?, code, as_of_date, shares, created_at from position_history
+            """,
+            (admin_id,),
+        )
+        conn.execute(
+            """
+            insert or ignore into user_portfolio_ticks
+              (user_id, sampled_at, snapshot_date, today_pnl, today_return, market)
+            select ?, sampled_at, snapshot_date, today_pnl, today_return, market
+            from portfolio_ticks
+            """,
+            (admin_id,),
+        )
+        conn.execute(
+            "insert into app_meta (key, value) values ('user_data_migrated_v1', ?)",
+            (str(admin_id),),
+        )
     conn.commit()
     conn.close()
 
@@ -577,9 +712,9 @@ def fetch_fund_profile(code):
 
 def update_fund_name_from_profile(code):
     profile = fetch_fund_profile(code)
-    row = db().execute("select name from funds where code=?", (code,)).fetchone()
-    if profile["name"] and profile["name"] != code and (not row or not row["name"] or row["name"] == code):
-        db().execute("update funds set name=? where code=?", (profile["name"], code))
+    rows = db().execute("select name from user_funds where code=?", (code,)).fetchall()
+    if profile["name"] and profile["name"] != code and any(not row["name"] or row["name"] == code for row in rows):
+        db().execute("update user_funds set name=? where code=?", (profile["name"], code))
         db().commit()
     return profile
 
@@ -754,15 +889,16 @@ def next_refresh_sleep(now=None):
     return 1800
 
 
-def insert_portfolio_tick(totals):
+def insert_portfolio_tick(totals, user_id):
     sampled_at = cn_now().isoformat(timespec="seconds")
     db().execute(
         """
-        insert or ignore into portfolio_ticks
-          (sampled_at, snapshot_date, today_pnl, today_return, market)
-        values (?, ?, ?, ?, ?)
+        insert or ignore into user_portfolio_ticks
+          (user_id, sampled_at, snapshot_date, today_pnl, today_return, market)
+        values (?, ?, ?, ?, ?, ?)
         """,
         (
+            user_id,
             sampled_at,
             cn_today(),
             totals.get("today_pnl") or 0,
@@ -806,9 +942,9 @@ def should_poll_official(now=None):
 def update_fund_name(code, name):
     if not name or name == code:
         return
-    row = db().execute("select name from funds where code=?", (code,)).fetchone()
-    if row and (not row["name"] or row["name"] == code):
-        db().execute("update funds set name=? where code=?", (name, code))
+    rows = db().execute("select name from user_funds where code=?", (code,)).fetchall()
+    if rows and any(not row["name"] or row["name"] == code for row in rows):
+        db().execute("update user_funds set name=? where code=?", (name, code))
         db().commit()
 
 
@@ -817,7 +953,9 @@ def refresh_all(force=False, state_started=False):
         return False
     errors = []
     try:
-        funds = db().execute("select code, name from funds order by code").fetchall()
+        funds = db().execute(
+            "select code, max(name) as name from user_funds group by code order by code"
+        ).fetchall()
         update_refresh_state(total=len(funds))
         fetch_intraday_now = in_intraday_refresh_window()
         fetch_official_now = force or should_poll_official()
@@ -851,8 +989,10 @@ def refresh_all(force=False, state_started=False):
             update_refresh_state(completed=index)
         if fetch_intraday_now:
             try:
-                _cards, totals = build_summary()
-                insert_portfolio_tick(totals)
+                user_rows = db().execute("select id from users where enabled=1").fetchall()
+                for user_row in user_rows:
+                    _cards, totals = build_summary(user_row["id"])
+                    insert_portfolio_tick(totals, user_row["id"])
             except Exception as exc:
                 errors.append(f"组合快照失败: {exc}")
     except Exception as exc:
@@ -921,8 +1061,12 @@ def cash_flow(row):
     return 0
 
 
-def opening_for(code):
-    return db().execute("select * from opening_positions where code=?", (code,)).fetchone()
+def opening_for(code, user_id=None):
+    user_id = user_id or active_user_id()
+    return db().execute(
+        "select * from user_opening_positions where user_id=? and code=?",
+        (user_id, code),
+    ).fetchone()
 
 
 def shares_delta(row, fallback_nav=None):
@@ -1069,12 +1213,16 @@ def confirmed_pnl_for_latest_official(code, opening, fallback_nav=0):
     return row_pnl(shares, official, base)
 
 
-def build_summary():
+def build_summary(user_id=None):
+    user_id = user_id or active_user_id()
     today = cn_today()
     session = trading_session()
     trading_today = session != "closed"
     market_started = market_session_started()
-    funds = db().execute("select * from funds order by code").fetchall()
+    funds = db().execute(
+        "select * from user_funds where user_id=? order by code",
+        (user_id,),
+    ).fetchall()
     cards = []
     totals = {
         "market": 0,
@@ -1121,7 +1269,7 @@ def build_summary():
         display_pct = display_nav["pct"] if display_nav else 0
         nav_value = display_nav["nav"] if display_nav else (nav["nav"] if nav else 0)
         market_nav_value = latest_official_nav["nav"] if latest_official_nav else 0
-        opening = opening_for(code)
+        opening = opening_for(code, user_id)
         shares = confirmed_shares_current(code, opening, nav_value)
         pending_rows = []
         pending_shares = 0
@@ -1240,7 +1388,7 @@ def build_summary():
             }
         )
     totals["return_rate"] = totals["pnl"] / totals["net_invested"] if totals["net_invested"] else 0
-    intraday_estimates = portfolio_estimated_intraday_series(today)
+    intraday_estimates = portfolio_estimated_intraday_series(today, user_id)
     if intraday_estimates:
         latest_intraday_estimate = intraday_estimates[-1]
         totals["estimate_today_pnl"] = latest_intraday_estimate["today_pnl"]
@@ -1405,20 +1553,21 @@ def is_market_chart_time(time_text):
     return (9 * 60 + 30 <= minutes <= 11 * 60 + 30) or (13 * 60 <= minutes <= 15 * 60)
 
 
-def portfolio_intraday_series(day):
+def portfolio_intraday_series(day, user_id=None):
+    user_id = user_id or active_user_id()
     if day == cn_today() and not market_session_started():
         return []
-    estimated_series = portfolio_estimated_intraday_series(day)
+    estimated_series = portfolio_estimated_intraday_series(day, user_id)
     if estimated_series:
         return estimated_series
     rows = db().execute(
         """
         select sampled_at, today_pnl, today_return, market
-        from portfolio_ticks
-        where snapshot_date=?
+        from user_portfolio_ticks
+        where user_id=? and snapshot_date=?
         order by sampled_at
         """,
-        (day,),
+        (user_id, day),
     ).fetchall()
     series = []
     for r in rows:
@@ -1435,13 +1584,17 @@ def portfolio_intraday_series(day):
     return series
 
 
-def portfolio_estimated_intraday_series(day):
-    funds = db().execute("select * from funds order by code").fetchall()
+def portfolio_estimated_intraday_series(day, user_id=None):
+    user_id = user_id or active_user_id()
+    funds = db().execute(
+        "select * from user_funds where user_id=? order by code",
+        (user_id,),
+    ).fetchall()
     fund_rows = []
     all_times = set()
     for fund in funds:
         code = fund["code"]
-        opening = opening_for(code)
+        opening = opening_for(code, user_id)
         latest = latest_nav(code)
         fallback_nav = latest["nav"] if latest else 0
         prev_official = previous_official_nav(code, day)
@@ -1603,10 +1756,121 @@ def build_compare_ranges(code, today_text):
     return [{"key": key, "label": label, **compare[key]} for key, label in range_defs]
 
 
+def require_admin():
+    user = current_user()
+    if not user or user["role"] != "admin":
+        abort(403, "没有管理员权限")
+    return user
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    init_db()
+    if current_user() is not None:
+        return redirect(safe_next_path(request.args.get("next") or request.form.get("next")))
+    error = ""
+    next_path = safe_next_path(request.args.get("next") or request.form.get("next"))
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        user = db().execute(
+            "select * from users where username=? and enabled=1",
+            (username,),
+        ).fetchone()
+        if user and check_password_hash(user["password_hash"], password):
+            session.clear()
+            session.permanent = True
+            session["user_id"] = user["id"]
+            session["csrf_token"] = secrets.token_urlsafe(32)
+            return redirect(next_path)
+        error = "用户名或密码不正确"
+    return render_template(
+        "login.html",
+        error=error,
+        next_path=next_path,
+        token_verified=request.args.get("token_verified") == "1",
+    )
+
+
+@app.post("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/admin/users", methods=["GET", "POST"])
+def admin_users():
+    init_db()
+    require_admin()
+    error = ""
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        display_name = request.form.get("display_name", "").strip()[:40] or username
+        password = request.form.get("password", "")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
+            error = "用户名需为3-32位字母、数字、点、下划线或短横线"
+        elif len(password) < 8:
+            error = "初始密码至少需要8位"
+        elif db().execute("select 1 from users where username=?", (username,)).fetchone():
+            error = "用户名已存在"
+        else:
+            db().execute(
+                """
+                insert into users (username, display_name, password_hash, role, enabled, created_at)
+                values (?, ?, ?, 'user', 1, ?)
+                """,
+                (
+                    username,
+                    display_name,
+                    generate_password_hash(password),
+                    cn_now().isoformat(timespec="seconds"),
+                ),
+            )
+            db().commit()
+            return redirect(url_for("admin_users"))
+    users = db().execute(
+        "select id, username, display_name, role, enabled, created_at from users order by id"
+    ).fetchall()
+    return render_template(
+        "users.html",
+        users=users,
+        error=error,
+        current_user=current_user(),
+    )
+
+
+@app.post("/admin/users/<int:user_id>/toggle")
+def toggle_user(user_id):
+    admin = require_admin()
+    if user_id == admin["id"]:
+        abort(400, "不能禁用当前管理员")
+    db().execute(
+        "update users set enabled=case when enabled=1 then 0 else 1 end where id=?",
+        (user_id,),
+    )
+    db().commit()
+    return redirect(url_for("admin_users"))
+
+
+@app.post("/admin/users/<int:user_id>/reset")
+def reset_user_password(user_id):
+    require_admin()
+    password = request.form.get("password", "")
+    if len(password) < 8:
+        abort(400, "密码至少需要8位")
+    db().execute(
+        "update users set password_hash=? where id=?",
+        (generate_password_hash(password), user_id),
+    )
+    db().commit()
+    return redirect(url_for("admin_users"))
+
+
 @app.route("/")
 def index():
     init_db()
-    cards, totals = build_summary()
+    user_id = active_user_id()
+    cards, totals = build_summary(user_id)
     sort = request.args.get("sort", "today_pnl_desc")
     sorters = {
         "today_pnl_desc": lambda c: (c["display_pnl"] or 0, c["market"]),
@@ -1618,9 +1882,12 @@ def index():
         "code_asc": lambda c: tuple(-ord(ch) for ch in c["fund"]["code"]),
     }
     cards = sorted(cards, key=sorters.get(sort, sorters["today_pnl_desc"]), reverse=True)
-    funds = db().execute("select * from funds order by code").fetchall()
+    funds = db().execute(
+        "select * from user_funds where user_id=? order by code",
+        (user_id,),
+    ).fetchall()
     edit_code = request.args.get("edit_opening", "").strip()
-    edit_opening = opening_for(edit_code) if edit_code else None
+    edit_opening = opening_for(edit_code, user_id) if edit_code else None
     return render_template(
         "index.html",
         cards=cards,
@@ -1632,6 +1899,7 @@ def index():
         today=cn_today(),
         default_opening_date=previous_trading_day().isoformat(),
         refresh_state=refresh_state_snapshot(),
+        current_user=current_user(),
     )
 
 
@@ -1639,7 +1907,11 @@ def index():
 def fund_detail(code):
     init_db()
     code = require_fund_code(code)
-    fund = db().execute("select * from funds where code=?", (code,)).fetchone()
+    user_id = active_user_id()
+    fund = db().execute(
+        "select * from user_funds where user_id=? and code=?",
+        (user_id, code),
+    ).fetchone()
     if not fund:
         return redirect(url_for("index"))
     history_error = ""
@@ -1656,6 +1928,7 @@ def fund_detail(code):
         latest_nav=latest_nav(code),
         history_error=history_error,
         refresh_state=refresh_state_snapshot(),
+        current_user=current_user(),
     )
 
 
@@ -1663,13 +1936,15 @@ def fund_detail(code):
 def today_detail():
     init_db()
     today = cn_today()
-    cards, totals = build_summary()
+    user_id = active_user_id()
+    cards, totals = build_summary(user_id)
     return render_template(
         "today.html",
         today=today,
-        series=portfolio_intraday_series(today),
+        series=portfolio_intraday_series(today, user_id),
         totals=totals,
         refresh_state=refresh_state_snapshot(),
+        current_user=current_user(),
     )
 
 
@@ -1681,19 +1956,21 @@ def api_state():
 @app.post("/funds")
 def add_fund():
     code = require_fund_code(request.form.get("code"))
+    user_id = active_user_id()
     typed_name = request.form.get("name", "").strip()[:100]
     profile = fetch_fund_profile(code) if not typed_name else {"name": typed_name}
     db().execute(
         """
-        insert into funds (code, name, fund_type, reference, note)
-        values (?, ?, ?, ?, ?)
-        on conflict(code) do update set
+        insert into user_funds (user_id, code, name, fund_type, reference, note)
+        values (?, ?, ?, ?, ?, ?)
+        on conflict(user_id, code) do update set
           name=excluded.name,
           fund_type=excluded.fund_type,
           reference=excluded.reference,
           note=excluded.note
         """,
         (
+            user_id,
             code,
             typed_name or profile["name"] or code,
             request.form.get("fund_type", "").strip(),
@@ -1718,22 +1995,27 @@ def add_trade():
 @app.post("/opening")
 def save_opening():
     code = require_fund_code(request.form.get("code"))
+    user_id = active_user_id()
     as_of_day = require_iso_date(request.form.get("as_of_date"), "持仓日期")
     if not is_trading_day(as_of_day):
         abort(400, "持仓日期必须是交易日")
     shares = require_nonnegative_number(request.form.get("shares"), "持有份额")
-    if not db().execute("select code from funds where code=?", (code,)).fetchone():
+    if not db().execute(
+        "select code from user_funds where user_id=? and code=?",
+        (user_id, code),
+    ).fetchone():
         profile = fetch_fund_profile(code)
         db().execute(
-            "insert into funds (code, name, fund_type, reference, note) values (?, ?, '', '', '')",
-            (code, profile["name"] or code),
+            "insert into user_funds (user_id, code, name, fund_type, reference, note) values (?, ?, ?, '', '', '')",
+            (user_id, code, profile["name"] or code),
         )
     now_text = datetime.now().isoformat(timespec="seconds")
     db().execute(
         """
-        insert into opening_positions (code, as_of_date, shares, cost_amount, nav, note, created_at)
-        values (?, ?, ?, ?, ?, ?, ?)
-        on conflict(code) do update set
+        insert into user_opening_positions
+          (user_id, code, as_of_date, shares, cost_amount, nav, note, created_at)
+        values (?, ?, ?, ?, ?, ?, ?, ?)
+        on conflict(user_id, code) do update set
           as_of_date=excluded.as_of_date,
           shares=excluded.shares,
           cost_amount=excluded.cost_amount,
@@ -1742,6 +2024,7 @@ def save_opening():
           created_at=excluded.created_at
         """,
         (
+            user_id,
             code,
             as_of_day.isoformat(),
             shares,
@@ -1753,10 +2036,11 @@ def save_opening():
     )
     db().execute(
         """
-        insert into position_history (code, as_of_date, shares, created_at)
-        values (?, ?, ?, ?)
+        insert into user_position_history (user_id, code, as_of_date, shares, created_at)
+        values (?, ?, ?, ?, ?)
         """,
         (
+            user_id,
             code,
             as_of_day.isoformat(),
             shares,
@@ -1770,13 +2054,10 @@ def save_opening():
 @app.post("/funds/<code>/delete")
 def delete_fund(code):
     code = require_fund_code(code)
-    db().execute("delete from trades where code=?", (code,))
-    db().execute("delete from opening_positions where code=?", (code,))
-    db().execute("delete from position_history where code=?", (code,))
-    db().execute("delete from valuations where code=?", (code,))
-    db().execute("delete from valuation_ticks where code=?", (code,))
-    db().execute("delete from close_snapshots where code=?", (code,))
-    db().execute("delete from funds where code=?", (code,))
+    user_id = active_user_id()
+    db().execute("delete from user_opening_positions where user_id=? and code=?", (user_id, code))
+    db().execute("delete from user_position_history where user_id=? and code=?", (user_id, code))
+    db().execute("delete from user_funds where user_id=? and code=?", (user_id, code))
     db().commit()
     return redirect(url_for("index"))
 

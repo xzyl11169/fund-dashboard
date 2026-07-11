@@ -1,0 +1,5 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#f5f7fb"><title>登录 - 基金盈亏</title><link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"></head>
+<body><main class="login-shell"><section class="login-panel"><div class="login-mark">基金盈亏</div><h1>登录账户</h1><p class="login-subtitle">查看你的基金持仓和当日盈亏</p>{% if token_verified %}<div class="notice">设备链接已识别，请输入账户密码登录。</div>{% endif %}{% if error %}<div class="form-error">{{ error }}</div>{% endif %}<form method="post" class="login-form"><input type="hidden" name="next" value="{{ next_path }}"><label>用户名<input name="username" autocomplete="username" required autofocus></label><label>密码<input name="password" type="password" autocomplete="current-password" required></label><button class="wide-button" type="submit">登录</button></form></section></main></body>
+</html>

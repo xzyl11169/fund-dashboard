@@ -21,6 +21,7 @@
           <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
           <button class="primary" type="submit">刷新</button>
         </form>
+        <div class="account-actions"><span class="account-name">{{ current_user.display_name }}</span><form action="{{ url_for('logout') }}" method="post"><input type="hidden" name="_csrf_token" value="{{ csrf_token() }}"><button class="ghost-button" type="submit">退出</button></form></div>
       </div>
     </header>
 

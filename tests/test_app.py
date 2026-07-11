@@ -15,9 +15,11 @@ class FundDashboardTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         fund_app.DB_PATH = Path(self.temp_dir.name) / "test.sqlite3"
+        fund_app.ADMIN_PASSWORD = "test-password"
         fund_app.init_db()
         self.context = fund_app.app.app_context()
         self.context.push()
+        self.admin_id = fund_app.db().execute("select id from users where username='admin'").fetchone()[0]
         fund_app.update_refresh_state(
             last_run="",
             last_error="",
@@ -32,16 +34,24 @@ class FundDashboardTests(unittest.TestCase):
         self.context.pop()
         self.temp_dir.cleanup()
 
+    def login(self, client):
+        response = client.post("/login", data={"username": "admin", "password": "test-password"})
+        self.assertEqual(response.status_code, 302)
+
     def add_position(self, code, shares=100):
         conn = fund_app.db()
-        conn.execute("insert into funds (code, name) values (?, ?)", (code, code))
+        conn.execute("insert into user_funds (user_id, code, name) values (?, ?, ?)", (self.admin_id, code, code))
         conn.execute(
             """
-            insert into opening_positions
-              (code, as_of_date, shares, cost_amount, nav, note, created_at)
-            values (?, '2026-07-08', ?, 0, 0, '', '2026-07-08T12:00:00')
+            insert into user_opening_positions
+              (user_id, code, as_of_date, shares, cost_amount, nav, note, created_at)
+            values (?, ?, '2026-07-08', ?, 0, 0, '', '2026-07-08T12:00:00')
             """,
-            (code, shares),
+            (self.admin_id, code, shares),
+        )
+        conn.execute(
+            "insert into user_position_history (user_id, code, as_of_date, shares, created_at) values (?, ?, '2026-07-08', ?, '2026-07-08T12:00:00')",
+            (self.admin_id, code, shares),
         )
         conn.commit()
 
@@ -83,6 +93,25 @@ class FundDashboardTests(unittest.TestCase):
             self.assertFalse(fund_app.market_session_started())
             self.assertFalse(fund_app.in_intraday_refresh_window())
 
+    def test_user_holdings_are_isolated(self):
+        self.add_position("000001", shares=100)
+        conn = fund_app.db()
+        conn.execute(
+            "insert into users (username, display_name, password_hash, role, enabled, created_at) values (?, ?, ?, 'user', 1, ?)",
+            ("family01", "家人", fund_app.generate_password_hash("family-pass"), "2026-07-10T10:00:00"),
+        )
+        family_id = conn.execute("select id from users where username='family01'").fetchone()[0]
+        conn.execute("insert into user_funds (user_id, code, name) values (?, '000002', '另一只基金')", (family_id,))
+        conn.execute("insert into user_opening_positions (user_id, code, as_of_date, shares, cost_amount, nav, note, created_at) values (?, '000002', '2026-07-08', 200, 0, 0, '', '2026-07-08T12:00:00')", (family_id,))
+        conn.commit()
+        self.add_nav("000001", "2026-07-09", 1, 0, True)
+        self.add_nav("000002", "2026-07-09", 1, 0, True)
+        with patch.object(fund_app, "cn_now", return_value=datetime(2026, 7, 10, 10, 0, tzinfo=CN_TZ)):
+            own_cards, _ = fund_app.build_summary(self.admin_id)
+            family_cards, _ = fund_app.build_summary(family_id)
+        self.assertEqual([card["fund"]["code"] for card in own_cards], ["000001"])
+        self.assertEqual([card["fund"]["code"] for card in family_cards], ["000002"])
+
     def test_estimate_return_only_uses_covered_positions(self):
         self.add_position("000001")
         self.add_position("000002")
@@ -92,7 +121,7 @@ class FundDashboardTests(unittest.TestCase):
         now = datetime(2026, 7, 10, 10, 0, tzinfo=CN_TZ)
 
         with patch.object(fund_app, "cn_now", return_value=now):
-            _cards, totals = fund_app.build_summary()
+            _cards, totals = fund_app.build_summary(self.admin_id)
 
         self.assertAlmostEqual(totals["estimate_today_pnl"], 10)
         self.assertAlmostEqual(totals["estimate_today_return"], 0.1)
@@ -109,7 +138,7 @@ class FundDashboardTests(unittest.TestCase):
         now = datetime(2026, 7, 10, 20, 0, tzinfo=CN_TZ)
 
         with patch.object(fund_app, "cn_now", return_value=now):
-            _cards, totals = fund_app.build_summary()
+            _cards, totals = fund_app.build_summary(self.admin_id)
 
         self.assertAlmostEqual(totals["actual_today_pnl"], 8)
         self.assertAlmostEqual(totals["actual_today_return"], 0.08)
@@ -123,7 +152,7 @@ class FundDashboardTests(unittest.TestCase):
         now = datetime(2026, 7, 10, 9, 0, tzinfo=CN_TZ)
 
         with patch.object(fund_app, "cn_now", return_value=now):
-            cards, totals = fund_app.build_summary()
+            cards, totals = fund_app.build_summary(self.admin_id)
 
         self.assertIsNone(totals["estimate_today_pnl"])
         self.assertIsNone(totals["actual_today_pnl"])
@@ -137,7 +166,7 @@ class FundDashboardTests(unittest.TestCase):
         now = datetime(2026, 7, 10, 14, 0, tzinfo=CN_TZ)
 
         with patch.object(fund_app, "cn_now", return_value=now):
-            cards, totals = fund_app.build_summary()
+            cards, totals = fund_app.build_summary(self.admin_id)
 
         self.assertIsNone(totals["actual_today_pnl"])
         self.assertIsNone(cards[0]["official_nav"])
@@ -154,12 +183,13 @@ class FundDashboardTests(unittest.TestCase):
         )
         fund_app.db().commit()
 
-        opening = fund_app.opening_for("000001")
+        opening = fund_app.opening_for("000001", self.admin_id)
         self.assertEqual(fund_app.shares_current("000001", opening), 100)
 
     def test_opening_requires_csrf_and_records_history(self):
         self.add_position("000001")
         client = fund_app.app.test_client()
+        self.login(client)
 
         missing = client.post(
             "/opening",
@@ -167,7 +197,6 @@ class FundDashboardTests(unittest.TestCase):
         )
         self.assertEqual(missing.status_code, 400)
 
-        client.get("/")
         with client.session_transaction() as browser_session:
             token = browser_session["csrf_token"]
         saved = client.post(
@@ -180,16 +209,17 @@ class FundDashboardTests(unittest.TestCase):
             },
         )
         self.assertEqual(saved.status_code, 302)
-        opening = fund_app.opening_for("000001")
+        opening = fund_app.opening_for("000001", self.admin_id)
         self.assertEqual(opening["shares"], 123.45)
         history_rows = fund_app.db().execute(
-            "select shares from position_history where code='000001' order by id"
+            "select shares from user_position_history where user_id=? and code='000001' order by id",
+            (self.admin_id,)
         ).fetchall()
         self.assertEqual([row["shares"] for row in history_rows], [100, 123.45])
 
     def test_invalid_opening_is_rejected(self):
         client = fund_app.app.test_client()
-        client.get("/")
+        self.login(client)
         with client.session_transaction() as browser_session:
             token = browser_session["csrf_token"]
         response = client.post(
@@ -202,7 +232,7 @@ class FundDashboardTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(fund_app.db().execute("select count(*) from funds").fetchone()[0], 0)
+        self.assertEqual(fund_app.db().execute("select count(*) from user_funds").fetchone()[0], 0)
 
     def test_only_one_refresh_can_run(self):
         self.assertTrue(fund_app.begin_refresh())
@@ -215,15 +245,16 @@ class FundDashboardTests(unittest.TestCase):
             patch.object(fund_app, "APP_TOKEN", "device-secret"),
             patch.object(fund_app, "APP_PIN", ""),
         ):
-            self.assertEqual(client.get("/").status_code, 401)
+            self.assertEqual(client.get("/").status_code, 302)
             unlocked = client.get("/?access=device-secret")
             self.assertEqual(unlocked.status_code, 302)
-            self.assertIn("fund_access=", unlocked.headers.get("Set-Cookie", ""))
+            self.assertIn("/login", unlocked.headers.get("Location", ""))
+            self.login(client)
             self.assertEqual(client.get("/").status_code, 200)
 
     def test_market_refresh_reuses_intraday_name_data(self):
         self.add_position("000001")
-        fund_app.db().execute("update funds set name='测试基金' where code='000001'")
+        fund_app.db().execute("update user_funds set name='测试基金' where user_id=? and code='000001'", (self.admin_id,))
         fund_app.db().commit()
         self.add_nav("000001", "2026-07-09", 1, 0, True)
         now = datetime(2026, 7, 10, 10, 0, tzinfo=CN_TZ)
