@@ -1617,6 +1617,17 @@ select {
     display: none;
   }
 
+  .mobile-metric {
+    grid-row: 2;
+  }
+
+  .mobile-estimate-pct { grid-column: 1; }
+  .mobile-estimate-pnl { grid-column: 2; }
+  .mobile-market { grid-column: 3; }
+  .mobile-yesterday-pct { grid-column: 1; grid-row: 3; }
+  .mobile-confirmed-pnl { grid-column: 2; grid-row: 3; }
+  .mobile-shares { grid-column: 3; grid-row: 3; }
+
   .estimate-end,
   .confirmed-end,
   td:nth-child(9) {

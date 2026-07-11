@@ -155,11 +155,11 @@
                     -
                   {% endif %}
                 </td>
-                <td data-label="{{ '15:00预估涨幅' if c.state == 'B' else '实时预估涨幅' }}" class="estimate-cell {{ 'gain' if left_nav and left_nav.pct >= 0 else 'loss' }}">
+                <td data-label="{{ '15:00预估涨幅' if c.state == 'B' else '实时预估涨幅' }}" class="estimate-cell mobile-metric mobile-estimate-pct {{ 'gain' if left_nav and left_nav.pct >= 0 else 'loss' }}">
                   <b>{{ left_nav.pct|percent if left_nav else "-" }}</b>
                 </td>
                 {% set estimate_pnl = c.estimate_display_pnl %}
-                <td data-label="{{ '15:00预估盈亏' if c.state == 'B' else '实时预估盈亏' }}" class="privacy-cell estimate-cell estimate-end {{ 'gain' if estimate_pnl is not none and estimate_pnl >= 0 else 'loss' if estimate_pnl is not none else '' }}">
+                <td data-label="{{ '15:00预估盈亏' if c.state == 'B' else '实时预估盈亏' }}" class="privacy-cell estimate-cell estimate-end mobile-metric mobile-estimate-pnl {{ 'gain' if estimate_pnl is not none and estimate_pnl >= 0 else 'loss' if estimate_pnl is not none else '' }}">
                   <b class="money-value">{{ estimate_pnl|money }}</b>
                 </td>
                 <td data-label="{{ '今日净值' if c.state == 'B' else '昨日净值' }}" class="num-cell compare-cell confirmed-cell confirmed-start">
@@ -171,21 +171,21 @@
                     -
                   {% endif %}
                 </td>
-                <td data-label="{{ '今日涨跌幅' if c.state == 'B' else '昨日涨跌幅' }}" class="compare-cell confirmed-cell mobile-secondary {{ 'gain' if right_nav and right_nav.pct >= 0 else 'loss' }}">
+                <td data-label="{{ '今日涨跌幅' if c.state == 'B' else '昨日涨跌幅' }}" class="compare-cell confirmed-cell mobile-secondary mobile-metric mobile-yesterday-pct {{ 'gain' if right_nav and right_nav.pct >= 0 else 'loss' }}">
                   <b>{{ right_nav.pct|percent if right_nav else "-" }}</b>
                 </td>
                 {% set confirmed_pnl = c.confirmed_pnl %}
-                <td data-label="{{ c.confirmed_pnl_label }}" class="privacy-cell compare-cell confirmed-cell confirmed-end mobile-secondary {{ 'gain' if confirmed_pnl is not none and confirmed_pnl >= 0 else 'loss' if confirmed_pnl is not none else '' }}">
+                <td data-label="{{ c.confirmed_pnl_label }}" class="privacy-cell compare-cell confirmed-cell confirmed-end mobile-secondary mobile-metric mobile-confirmed-pnl {{ 'gain' if confirmed_pnl is not none and confirmed_pnl >= 0 else 'loss' if confirmed_pnl is not none else '' }}">
                   <b class="money-value">{{ confirmed_pnl|money }}</b>
                 </td>
-                <td data-label="市值" class="privacy-cell">
+                <td data-label="市值" class="privacy-cell mobile-metric mobile-market">
                   <b class="money-value">{{ c.market|money }}</b>
                   <small class="position-note">{{ ((c.market / totals.market * 100) if totals.market else none)|percent }}</small>
                   {% if c.pending_count %}
                     <small class="pending-note">待确认 {{ c.pending_amount|money }}</small>
                   {% endif %}
                 </td>
-                <td data-label="份额" class="privacy-cell mobile-secondary">
+                <td data-label="份额" class="privacy-cell mobile-secondary mobile-metric mobile-shares">
                   <span class="money-value">{{ c.shares|money }}</span>
                   {% if c.pending_count %}
                     <small class="pending-note">待确认 {{ c.pending_shares|money }}</small>
