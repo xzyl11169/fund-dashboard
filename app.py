@@ -218,6 +218,30 @@ def safe_next_path(value):
     return value if value.startswith("/") and not value.startswith("//") else "/"
 
 
+def login_ip_address():
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    return (forwarded.split(",", 1)[0].strip() if forwarded else request.remote_addr or "")[:80]
+
+
+def record_login_event(user_id, username, success):
+    db().execute(
+        """
+        insert into login_events
+          (user_id, username, ip_address, user_agent, success, logged_at)
+        values (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            username[:80],
+            login_ip_address(),
+            request.headers.get("User-Agent", "")[:300],
+            1 if success else 0,
+            cn_now().isoformat(timespec="seconds"),
+        ),
+    )
+    db().commit()
+
+
 @app.before_request
 def require_login():
     if request.path.startswith("/static/") or request.path == "/service-worker.js":
@@ -372,6 +396,17 @@ def init_db():
           created_at text not null
         );
 
+        create table if not exists login_events (
+          id integer primary key autoincrement,
+          user_id integer,
+          username text not null default '',
+          ip_address text not null default '',
+          user_agent text not null default '',
+          success integer not null default 0,
+          logged_at text not null,
+          foreign key(user_id) references users(id)
+        );
+
         create table if not exists app_meta (
           key text primary key,
           value text not null
@@ -441,6 +476,10 @@ def init_db():
           on user_position_history(user_id, code, as_of_date, created_at, id);
         create index if not exists idx_user_portfolio_user_date
           on user_portfolio_ticks(user_id, snapshot_date, sampled_at);
+        create index if not exists idx_login_events_time
+          on login_events(logged_at desc, id desc);
+        create index if not exists idx_login_events_user_time
+          on login_events(user_id, logged_at desc, id desc);
         """
     )
     conn.execute(
@@ -1778,11 +1817,13 @@ def login():
             (username,),
         ).fetchone()
         if user and check_password_hash(user["password_hash"], password):
+            record_login_event(user["id"], username, True)
             session.clear()
             session.permanent = True
             session["user_id"] = user["id"]
             session["csrf_token"] = secrets.token_urlsafe(32)
             return redirect(next_path)
+        record_login_event(user["id"] if user else None, username, False)
         error = "用户名或密码不正确"
     return render_template(
         "login.html",
@@ -1835,6 +1876,25 @@ def admin_users():
         "users.html",
         users=users,
         error=error,
+        current_user=current_user(),
+    )
+
+
+@app.get("/admin/login-log")
+def admin_login_log():
+    require_admin()
+    events = db().execute(
+        """
+        select e.*, coalesce(u.display_name, e.username) as display_name
+        from login_events e
+        left join users u on u.id=e.user_id
+        order by e.logged_at desc, e.id desc
+        limit 200
+        """
+    ).fetchall()
+    return render_template(
+        "login_log.html",
+        events=events,
         current_user=current_user(),
     )
 
