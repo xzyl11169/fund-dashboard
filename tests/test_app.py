@@ -93,6 +93,10 @@ class FundDashboardTests(unittest.TestCase):
             self.assertFalse(fund_app.market_session_started())
             self.assertFalse(fund_app.in_intraday_refresh_window())
 
+    def test_qdii_does_not_expect_intraday_estimate(self):
+        self.assertFalse(fund_app.intraday_estimate_expected("164906", "交银中证海外中国互联网指数(LOF)A"))
+        self.assertTrue(fund_app.intraday_estimate_expected("110022", "易方达消费行业股票"))
+
     def test_user_holdings_are_isolated(self):
         self.add_position("000001", shares=100)
         conn = fund_app.db()

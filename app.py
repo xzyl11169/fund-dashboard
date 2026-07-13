@@ -555,6 +555,21 @@ def init_db():
     conn.close()
 
 
+INTRADAY_UNSUPPORTED_KEYWORDS = (
+    "QDII",
+    "海外",
+    "全球",
+    "亚太",
+    "纳斯达克",
+    "标普",
+)
+
+
+def intraday_estimate_expected(code, name=""):
+    text = f"{code} {name}".upper()
+    return not any(keyword.upper() in text for keyword in INTRADAY_UNSUPPORTED_KEYWORDS)
+
+
 def fetch_intraday(code):
     url = f"https://fundgz.1234567.com.cn/js/{code}.js?rt={int(datetime.now().timestamp() * 1000)}"
     resp = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
@@ -1002,7 +1017,7 @@ def refresh_all(force=False, state_started=False):
             code = fund["code"]
             update_refresh_state(phase=f"正在更新 {code}")
             intraday = None
-            if fetch_intraday_now:
+            if fetch_intraday_now and intraday_estimate_expected(code, fund["name"]):
                 try:
                     intraday = fetch_intraday(code)
                     upsert_valuation(intraday)
