@@ -1,5 +1,6 @@
 import json
 import hmac
+import ipaddress
 import math
 import os
 import re
@@ -8,6 +9,7 @@ import sqlite3
 import threading
 import time
 from datetime import date, datetime, time as dt_time, timedelta
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -135,6 +137,19 @@ def source_filter(value):
     return value
 
 
+@app.template_filter("bjtime")
+def beijing_time_filter(value):
+    if not value:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=CN_TZ)
+        return parsed.astimezone(CN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def csrf_token():
     token = session.get("csrf_token")
     if not token:
@@ -223,17 +238,40 @@ def login_ip_address():
     return (forwarded.split(",", 1)[0].strip() if forwarded else request.remote_addr or "")[:80]
 
 
+@lru_cache(maxsize=128)
+def lookup_ip_city(ip_address):
+    try:
+        parsed = ipaddress.ip_address(ip_address)
+        if parsed.is_private or parsed.is_loopback or parsed.is_reserved:
+            return "内网/代理"
+    except ValueError:
+        return "未知"
+    try:
+        response = requests.get(
+            f"https://ipapi.co/{ip_address}/json/",
+            timeout=2.5,
+            headers={"User-Agent": "fund-dashboard/1.0"},
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("city") or data.get("region") or "未知"
+    except (requests.RequestException, ValueError):
+        return "未知"
+
+
 def record_login_event(user_id, username, success):
+    ip_address = login_ip_address()
     db().execute(
         """
         insert into login_events
-          (user_id, username, ip_address, user_agent, success, logged_at)
-        values (?, ?, ?, ?, ?, ?)
+          (user_id, username, ip_address, city, user_agent, success, logged_at)
+        values (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             user_id,
             username[:80],
-            login_ip_address(),
+            ip_address,
+            lookup_ip_city(ip_address),
             request.headers.get("User-Agent", "")[:300],
             1 if success else 0,
             cn_now().isoformat(timespec="seconds"),
@@ -401,6 +439,7 @@ def init_db():
           user_id integer,
           username text not null default '',
           ip_address text not null default '',
+          city text not null default '',
           user_agent text not null default '',
           success integer not null default 0,
           logged_at text not null,
@@ -482,6 +521,9 @@ def init_db():
           on login_events(user_id, logged_at desc, id desc);
         """
     )
+    login_columns = {row["name"] for row in conn.execute("pragma table_info(login_events)").fetchall()}
+    if "city" not in login_columns:
+        conn.execute("alter table login_events add column city text not null default ''")
     conn.execute(
         """
         insert into position_history (code, as_of_date, shares, created_at)
@@ -1482,6 +1524,50 @@ def build_summary(user_id=None):
     return cards, totals
 
 
+def sunburst_data(cards):
+    category_keywords = (
+        ("QDII", ("QDII", "海外", "全球", "亚太", "纳斯达克", "标普")),
+        ("债券", ("债",)),
+        ("指数", ("指数", "ETF", "LOF")),
+        ("股票", ("股票",)),
+        ("混合", ("混合",)),
+    )
+    groups = {}
+    for card in cards:
+        value = max(float(card.get("market") or 0), 0)
+        if not value:
+            continue
+        fund = card["fund"]
+        name = fund["name"] or fund["code"]
+        text = f"{fund['code']} {name}".upper()
+        category = "其他"
+        for label, keywords in category_keywords:
+            if any(keyword.upper() in text for keyword in keywords):
+                category = label
+                break
+        groups.setdefault(category, []).append(
+            {"name": f"{fund['code']} {name}", "value": round(value, 2)}
+        )
+    children = []
+    for category, items in sorted(
+        groups.items(),
+        key=lambda item: sum(child["value"] for child in item[1]),
+        reverse=True,
+    ):
+        children.append(
+            {
+                "name": category,
+                "value": round(sum(item["value"] for item in items), 2),
+                "children": sorted(items, key=lambda item: item["value"], reverse=True),
+            }
+        )
+    return {
+        "name": "持仓结构",
+        "value": round(sum(child["value"] for child in children), 2),
+        "children": children,
+    }
+
+
 def latest_date_label(is_official):
     row = db().execute(
         """
@@ -1967,6 +2053,7 @@ def index():
         "index.html",
         cards=cards,
         totals=totals,
+        sunburst_data=sunburst_data(cards),
         funds=funds,
         sort=sort,
         edit_code=edit_code,

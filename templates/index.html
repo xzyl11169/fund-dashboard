@@ -84,6 +84,22 @@
       </article>
     </section>
 
+    <section class="panel sunburst-panel">
+      <div class="panel-title">
+        <div>
+          <h2>持仓结构</h2>
+          <p>按基金类型和市值占比展示，点击或悬停查看基金。</p>
+        </div>
+      </div>
+      <div class="sunburst-layout">
+        <div id="sunburst-chart" class="sunburst-chart" aria-label="持仓结构旭日图"></div>
+        <div class="sunburst-aside">
+          <div id="sunburst-focus" class="sunburst-focus"></div>
+          <div id="sunburst-legend" class="sunburst-legend"></div>
+        </div>
+      </div>
+    </section>
+
     <section class="workspace">
       <section class="panel holdings-panel">
         <div class="panel-title">
@@ -408,6 +424,82 @@
         }
       }
     });
+
+    const sunburstData = {{ sunburst_data|tojson }};
+    const sunburstColors = ["#2563eb", "#0f766e", "#c2410c", "#7c3aed", "#ca8a04", "#64748b"];
+    const sunburstHues = [220, 174, 20, 264, 44, 215];
+    const sunburstChart = document.querySelector("#sunburst-chart");
+    const sunburstLegend = document.querySelector("#sunburst-legend");
+    const sunburstFocus = document.querySelector("#sunburst-focus");
+
+    function sunburstPoint(radius, angle) {
+      return [180 + radius * Math.cos(angle), 180 + radius * Math.sin(angle)];
+    }
+
+    function sunburstArc(inner, outer, start, end) {
+      const [x1, y1] = sunburstPoint(outer, start);
+      const [x2, y2] = sunburstPoint(outer, end);
+      const [x3, y3] = sunburstPoint(inner, end);
+      const [x4, y4] = sunburstPoint(inner, start);
+      const large = end - start > Math.PI ? 1 : 0;
+      return `M ${x1} ${y1} A ${outer} ${outer} 0 ${large} 1 ${x2} ${y2} L ${x3} ${y3} A ${inner} ${inner} 0 ${large} 0 ${x4} ${y4} Z`;
+    }
+
+    function showSunburstFocus(name, value, color, type) {
+      if (!sunburstFocus) return;
+      sunburstFocus.innerHTML = `<div class="sunburst-focus-kicker">${type}</div><strong>${name}</strong><div><span class="sunburst-focus-dot" style="background:${color}"></span><b class="sunburst-values">${value.toFixed(2)}</b><small class="sunburst-values">${(value / (sunburstData.value || 1) * 100).toFixed(2)}%</small></div>`;
+    }
+
+    function renderSunburst() {
+      if (!sunburstChart || !sunburstLegend || !sunburstData.children?.length) {
+        if (sunburstChart) sunburstChart.innerHTML = '<div class="sunburst-empty">暂无可展示的市值数据</div>';
+        return;
+      }
+      const total = sunburstData.value || 1;
+      const ns = "http://www.w3.org/2000/svg";
+      const svg = document.createElementNS(ns, "svg");
+      svg.setAttribute("viewBox", "0 0 360 360");
+      svg.setAttribute("role", "img");
+      svg.setAttribute("aria-label", "持仓结构旭日图");
+      let angle = -Math.PI / 2;
+      const legend = [];
+      sunburstData.children.forEach((group, groupIndex) => {
+        const groupStart = angle;
+        const groupEnd = groupStart + (group.value / total) * Math.PI * 2;
+        const groupPath = document.createElementNS(ns, "path");
+        groupPath.setAttribute("d", sunburstArc(52, 104, groupStart + 0.008, groupEnd - 0.008));
+        groupPath.setAttribute("fill", sunburstColors[groupIndex % sunburstColors.length]);
+        groupPath.classList.add("sunburst-slice", "sunburst-group");
+        groupPath.innerHTML = `<title>${group.name}：${group.value.toFixed(2)}，${(group.value / total * 100).toFixed(2)}%</title>`;
+        groupPath.addEventListener("mouseenter", () => showSunburstFocus(group.name, group.value, sunburstColors[groupIndex % sunburstColors.length], "基金类型"));
+        svg.appendChild(groupPath);
+        let fundAngle = groupStart;
+        group.children.forEach((fund, fundIndex) => {
+          const fundEnd = fundAngle + (fund.value / group.value) * (groupEnd - groupStart);
+          const fundPath = document.createElementNS(ns, "path");
+          fundPath.setAttribute("d", sunburstArc(108, 164, fundAngle + 0.006, fundEnd - 0.006));
+          fundPath.setAttribute("fill", `hsl(${sunburstHues[groupIndex % sunburstHues.length]} 62% ${50 + Math.min(fundIndex * 4, 24)}%)`);
+          fundPath.classList.add("sunburst-slice", "sunburst-fund");
+          fundPath.innerHTML = `<title>${fund.name}：${fund.value.toFixed(2)}，${(fund.value / total * 100).toFixed(2)}%</title>`;
+          fundPath.addEventListener("mouseenter", () => showSunburstFocus(fund.name, fund.value, `hsl(${sunburstHues[groupIndex % sunburstHues.length]} 62% ${50 + Math.min(fundIndex * 4, 24)}%)`, "基金"));
+          svg.appendChild(fundPath);
+          fundAngle = fundEnd;
+        });
+        legend.push(`<div class="sunburst-legend-item"><i style="background:${sunburstColors[groupIndex % sunburstColors.length]}"></i><span><b>${group.name}</b><small class="sunburst-values">${group.value.toFixed(2)}</small></span><strong class="sunburst-values">${(group.value / total * 100).toFixed(2)}%</strong></div>`);
+        angle = groupEnd;
+      });
+      const center = document.createElementNS(ns, "text");
+      center.setAttribute("x", "180"); center.setAttribute("y", "174"); center.setAttribute("text-anchor", "middle"); center.classList.add("sunburst-center-label"); center.textContent = "总市值";
+      svg.appendChild(center);
+      const amount = document.createElementNS(ns, "text");
+      amount.setAttribute("x", "180"); amount.setAttribute("y", "198"); amount.setAttribute("text-anchor", "middle"); amount.classList.add("sunburst-center-value", "sunburst-amount"); amount.textContent = sunburstData.value.toFixed(2);
+      svg.appendChild(amount);
+      sunburstChart.replaceChildren(svg);
+      sunburstLegend.innerHTML = legend.join("");
+      showSunburstFocus(sunburstData.children[0].name, sunburstData.children[0].value, sunburstColors[0], "基金类型");
+    }
+
+    renderSunburst();
 
     setInterval(async () => {
       if (document.hidden) return;

@@ -408,6 +408,162 @@ button.danger {
   align-items: start;
 }
 
+.sunburst-panel {
+  margin-bottom: 14px;
+}
+
+.sunburst-panel > .panel-title {
+  max-width: 840px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.sunburst-layout {
+  display: grid;
+  grid-template-columns: 360px minmax(280px, 420px);
+  gap: 22px;
+  align-items: center;
+  justify-content: center;
+  max-width: 840px;
+  margin: 0 auto;
+}
+
+.sunburst-chart {
+  min-height: 320px;
+  display: grid;
+  place-items: center;
+}
+
+.sunburst-chart svg {
+  display: block;
+  width: min(100%, 360px);
+  height: auto;
+  overflow: visible;
+}
+
+.sunburst-slice {
+  stroke: #fff;
+  stroke-width: 2;
+  cursor: pointer;
+  transition: opacity .16s ease, transform .16s ease;
+  transform-origin: 180px 180px;
+}
+
+.sunburst-slice:hover {
+  opacity: .78;
+  transform: scale(1.015);
+}
+
+.sunburst-center-label {
+  fill: var(--muted);
+  font-size: 12px;
+}
+
+.sunburst-center-value {
+  fill: var(--text);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.sunburst-legend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(150px, 1fr));
+  gap: 10px 18px;
+}
+
+.sunburst-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--subtle);
+  font-size: 13px;
+}
+
+.sunburst-legend-item i {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 3px;
+}
+
+.sunburst-legend-item span {
+  display: grid;
+  gap: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sunburst-legend-item span b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--subtle);
+  font-size: 13px;
+}
+
+.sunburst-legend-item span small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.sunburst-legend-item > strong {
+  margin-left: auto;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.sunburst-focus {
+  min-height: 78px;
+  margin-bottom: 18px;
+  padding: 13px 15px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #fbfcff;
+}
+
+.sunburst-focus-kicker {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.sunburst-focus strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sunburst-focus > div:last-child {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 7px;
+}
+
+.sunburst-focus-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+}
+
+.sunburst-focus small {
+  color: var(--muted);
+}
+
+.sunburst-empty {
+  color: var(--muted);
+  text-align: center;
+}
+
+.privacy-on .sunburst-amount,
+.privacy-on .sunburst-values {
+  visibility: hidden;
+}
+
 .panel {
   padding: 18px;
 }
@@ -1270,6 +1426,16 @@ select {
     min-width: 0;
   }
 
+  .sunburst-layout {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    max-width: none;
+  }
+
+  .sunburst-chart {
+    min-height: 280px;
+  }
+
   .chart-panel,
   .history-panel {
     padding: 14px;
@@ -1391,6 +1557,23 @@ select {
 
   .panel-title {
     gap: 9px;
+  }
+
+  .sunburst-panel {
+    padding: 14px;
+  }
+
+  .sunburst-chart {
+    min-height: 250px;
+  }
+
+  .sunburst-legend {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 12px;
+  }
+
+  .sunburst-focus {
+    margin-bottom: 12px;
   }
 
   .panel-tools {
