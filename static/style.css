@@ -299,6 +299,11 @@ button.danger {
   font-weight: 500;
 }
 
+.metrics span small.metric-order {
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
 .metrics strong {
   display: flex;
   align-items: baseline;

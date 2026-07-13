@@ -29,7 +29,7 @@
       {% set today_color_value = totals.estimate_today_pnl if totals.estimate_today_pnl is not none else totals.actual_today_pnl %}
       {% set today_return_color = totals.estimate_today_return if totals.estimate_today_return is not none else totals.actual_today_return %}
       <article class="metric-main {{ 'gain' if today_color_value is not none and today_color_value > 0 else 'loss' if today_color_value is not none and today_color_value < 0 else '' }}">
-        <span>今日盈亏</span>
+        <span>今日盈亏 <small class="metric-order">预估 / 实际</small></span>
         <strong>
           <em class="money-value">{{ totals.estimate_today_pnl|money }}</em>
           <i>/</i>
@@ -37,7 +37,7 @@
         </strong>
       </article>
       <article class="{{ 'gain' if today_return_color is not none and today_return_color > 0 else 'loss' if today_return_color is not none and today_return_color < 0 else '' }}">
-        <span>今日收益率</span>
+        <span>今日收益率 <small class="metric-order">预估 / 实际</small></span>
         <strong>
           <em>{{ (totals.estimate_today_return * 100)|percent if totals.estimate_today_return is not none else "-" }}</em>
           <i>/</i>
